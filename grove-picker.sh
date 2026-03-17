@@ -132,7 +132,7 @@ if [[ "${1:-}" == "--preview" ]]; then
   exit 0
 fi
 
-# Called for the send-prompt sub-popup
+# Called for the send-prompt inline
 if [[ "${1:-}" == "--send-popup" ]]; then
   pane_id="$2"
   printf "Send to %s\n" "$pane_id"
@@ -174,7 +174,7 @@ if [[ "${GROVE_PICKER_INNER:-}" == "1" ]]; then
     --no-multi \
     --delimiter=$'\t' \
     --with-nth=2 \
-    --header="enter:switch  ctrl-a:accept  ctrl-r:reject  ctrl-p:send  ctrl-l:refresh" \
+    --header="enter:switch  ctrl-a:accept  ctrl-r:reject  ctrl-p:send query  ctrl-l:refresh" \
     --header-first \
     --prompt="› " \
     --preview="$SELF --preview {1}" \
