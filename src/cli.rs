@@ -58,6 +58,9 @@ pub enum Commands {
         /// Base branch to create worktree from
         #[arg(long)]
         base: Option<String>,
+        /// Interactive mode: select repos and branch from prompts
+        #[arg(short, long)]
+        interactive: bool,
         /// Skip tmux session creation (default in Phase 1)
         #[arg(long)]
         no_tmux: bool,
