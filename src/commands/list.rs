@@ -16,7 +16,7 @@ pub fn run(state: &GroveState, json_mode: bool) -> Result<(), GroveError> {
         let task_list: Vec<serde_json::Value> = tasks
             .iter()
             .map(|t| {
-                let exists = t.path.exists();
+                let exists = !t.is_stale();
                 let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
                 serde_json::json!({
                     "task_id": t.id,
@@ -36,7 +36,7 @@ pub fn run(state: &GroveState, json_mode: bool) -> Result<(), GroveError> {
             "TASK", "REPOS", "REPO NAMES", "CREATED"
         );
         for t in &tasks {
-            let status = if t.path.exists() { "ok" } else { "STALE" };
+            let status = if t.is_stale() { "STALE" } else { "ok" };
             let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
             let created = t.created_at.format("%Y-%m-%d %H:%M").to_string();
             println!(

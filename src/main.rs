@@ -5,6 +5,7 @@ mod error;
 mod git;
 mod output;
 mod state;
+mod validation;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -48,19 +49,17 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             context,
             branch,
             base,
+            interactive,
             ..
         } => {
-            commands::init::run(
-                &task_id,
-                &repos,
-                context.as_deref(),
-                branch.as_deref(),
-                base.as_deref(),
-                &config,
-                &mut state,
-                json_mode,
-                verbose,
-            )?;
+            let opts = commands::init::InitOptions {
+                repos: &repos,
+                context: context.as_deref(),
+                branch: branch.as_deref(),
+                base: base.as_deref(),
+                interactive,
+            };
+            commands::init::run(&task_id, &opts, &config, &mut state, json_mode, verbose)?;
         }
         Commands::Close { task_id, force } => {
             commands::close::run(&task_id, force, &config, &mut state, json_mode, verbose)?;

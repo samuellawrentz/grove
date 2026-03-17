@@ -31,6 +31,16 @@ pub struct TaskEntry {
     pub created_at: DateTime<Utc>,
 }
 
+impl TaskEntry {
+    /// Returns true if the task directory or any worktree path is missing on disk.
+    pub fn is_stale(&self) -> bool {
+        if !self.path.exists() {
+            return true;
+        }
+        self.repos.iter().any(|r| !r.worktree_path.exists())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroveState {
     pub version: u32,

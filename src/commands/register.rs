@@ -5,22 +5,7 @@ use crate::error::GroveError;
 use crate::git;
 use crate::output;
 use crate::state::{GroveState, RepoEntry};
-
-/// Validate repo name: [a-zA-Z0-9._-]+
-fn validate_name(name: &str) -> Result<(), GroveError> {
-    if name.is_empty() {
-        return Err(GroveError::General("repo name cannot be empty".to_string()));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
-        return Err(GroveError::General(format!(
-            "invalid repo name '{name}': must match [a-zA-Z0-9._-]+"
-        )));
-    }
-    Ok(())
-}
+use crate::validation::validate_identifier;
 
 pub fn run(
     name: &str,
@@ -30,7 +15,7 @@ pub fn run(
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
-    validate_name(name)?;
+    validate_identifier(name, "repo name")?;
 
     // Check if already registered
     if let Some(existing) = state.repos.get(name) {
@@ -97,26 +82,4 @@ pub fn run(
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_name_valid() {
-        assert!(validate_name("my-repo").is_ok());
-        assert!(validate_name("my.repo").is_ok());
-        assert!(validate_name("my_repo").is_ok());
-        assert!(validate_name("MyRepo123").is_ok());
-        assert!(validate_name("a").is_ok());
-    }
-
-    #[test]
-    fn test_validate_name_invalid() {
-        assert!(validate_name("").is_err());
-        assert!(validate_name("my/repo").is_err());
-        assert!(validate_name("my repo").is_err());
-        assert!(validate_name("my@repo").is_err());
-    }
 }
