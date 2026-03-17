@@ -1,0 +1,122 @@
+use chrono::Utc;
+
+use crate::config::GroveConfig;
+use crate::error::GroveError;
+use crate::git;
+use crate::output;
+use crate::state::{GroveState, RepoEntry};
+
+/// Validate repo name: [a-zA-Z0-9._-]+
+fn validate_name(name: &str) -> Result<(), GroveError> {
+    if name.is_empty() {
+        return Err(GroveError::General("repo name cannot be empty".to_string()));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(GroveError::General(format!(
+            "invalid repo name '{name}': must match [a-zA-Z0-9._-]+"
+        )));
+    }
+    Ok(())
+}
+
+pub fn run(
+    name: &str,
+    url: &str,
+    config: &GroveConfig,
+    state: &mut GroveState,
+    json_mode: bool,
+    verbose: bool,
+) -> Result<(), GroveError> {
+    validate_name(name)?;
+
+    // Check if already registered
+    if let Some(existing) = state.repos.get(name) {
+        if existing.url == url {
+            // Idempotent: same URL, return success
+            let data = serde_json::json!({
+                "name": existing.name,
+                "url": existing.url,
+                "path": existing.path,
+                "default_branch": existing.default_branch,
+                "already_registered": true,
+            });
+            output::success(
+                json_mode,
+                &format!("Repository '{name}' already registered"),
+                data,
+            );
+            return Ok(());
+        } else {
+            return Err(GroveError::Conflict(format!(
+                "repository '{name}' already registered with different URL: {}",
+                existing.url
+            )));
+        }
+    }
+
+    // Create repos dir if needed
+    std::fs::create_dir_all(&config.repos_dir)?;
+
+    let bare_path = config.repos_dir.join(format!("{name}.git"));
+    if bare_path.exists() {
+        return Err(GroveError::General(format!(
+            "bare repo directory already exists: {}",
+            bare_path.display()
+        )));
+    }
+
+    // Clone bare
+    let default_branch = git::bare_clone(url, &bare_path, verbose)?;
+
+    let entry = RepoEntry {
+        name: name.to_string(),
+        url: url.to_string(),
+        path: bare_path.clone(),
+        default_branch: default_branch.clone(),
+        registered_at: Utc::now(),
+        last_synced_at: None,
+    };
+
+    state.repos.insert(name.to_string(), entry);
+    state.save()?;
+
+    let data = serde_json::json!({
+        "name": name,
+        "url": url,
+        "path": bare_path,
+        "default_branch": default_branch,
+        "already_registered": false,
+    });
+    output::success(
+        json_mode,
+        &format!("Registered '{name}' (default branch: {default_branch})"),
+        data,
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_name_valid() {
+        assert!(validate_name("my-repo").is_ok());
+        assert!(validate_name("my.repo").is_ok());
+        assert!(validate_name("my_repo").is_ok());
+        assert!(validate_name("MyRepo123").is_ok());
+        assert!(validate_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_invalid() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("my/repo").is_err());
+        assert!(validate_name("my repo").is_err());
+        assert!(validate_name("my@repo").is_err());
+    }
+}
