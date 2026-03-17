@@ -865,3 +865,68 @@ fn init_with_custom_context() {
         "CONTEXT.md should contain custom context text"
     );
 }
+
+// ============================================================================
+// Init with --branch flag
+// ============================================================================
+
+#[test]
+fn init_with_custom_branch() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo", "--branch", "feature-login"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("branch: feature-login"));
+
+    // Verify the branch exists by checking the worktree is on the right branch
+    let worktree = fix.tasks_dir.join("TASK-1").join("myrepo");
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(branch, "feature-login");
+
+    fix.grove_cmd()
+        .args(["close", "--force", "TASK-1"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn init_with_custom_branch_json() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let output = fix
+        .grove_cmd()
+        .args([
+            "--json",
+            "init",
+            "TASK-1",
+            "myrepo",
+            "--branch",
+            "my-feature",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["branch"], "my-feature");
+}
