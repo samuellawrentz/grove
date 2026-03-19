@@ -6,36 +6,24 @@
 #
 # Usage:
 #   grove-picker                    # launch popup (must be inside tmux)
-#   tmux bind-key g run-shell "grove-picker"   # bind to key
+#   tmux bind-key C-f run-shell "grove-picker"  # bind to key
 #
-# Requires: tmux, fzf
+# Requires: tmux, fzf, zoxide
 
 set -euo pipefail
 
 SELF="$(realpath "$0")"
-POPUP_WIDTH="80%"
-POPUP_HEIGHT="70%"
+POPUP_WIDTH="95%"
+POPUP_HEIGHT="95%"
 POLL_LINES=50
 STATE_LINES=10
 
 # --- Claude state detection ---
 
-# Detect state from already-captured content (no extra tmux calls)
+# Read state from shared hook-written JSON (set by claude-tmux-status.sh)
 detect_claude_state() {
-  local content="$1"
-
-  if [[ -z "$content" ]]; then
-    echo "active"
-    return
-  fi
-
-  # Check for waiting patterns (permission prompts)
-  if echo "$content" | grep -qiE '(\(y/n\)|\(Y/n\)|Allow this action\?|Do you want to (proceed|continue|allow)|Press Enter to confirm|Approve\?|\[Y/n\]|\[yes/no\]|Want me to)'; then
-    echo "waiting"
-    return
-  fi
-
-  echo "active"
+  local pane_id="$1"
+  jq -r --arg p "$pane_id" '.[$p].state // "active"' /tmp/claude-panes.json 2>/dev/null || echo "active"
 }
 
 get_pane_preview() {
@@ -49,11 +37,8 @@ find_claude_panes() {
   while IFS=$'\t' read -r pane_id session_name window_index pane_index pane_title pane_pid pane_cwd; do
     # Single pgrep check per pane
     if pgrep -P "$pane_pid" -f "claude" >/dev/null 2>&1; then
-      # Single capture for state detection
-      local content
-      content=$(tmux capture-pane -t "$pane_id" -p -S -"$STATE_LINES" 2>/dev/null || echo "")
       local state
-      state=$(detect_claude_state "$content")
+      state=$(detect_claude_state "$pane_id")
       local icon
       case "$state" in
         waiting) icon="◉" ;;
@@ -81,7 +66,7 @@ action_preview() {
 
 action_accept() {
   local pane_id="$1"
-  tmux send-keys -t "$pane_id" "y" Enter
+  tmux send-keys -t "$pane_id" Enter
 }
 
 action_reject() {
@@ -98,6 +83,19 @@ action_send_prompt() {
   fi
 }
 
+action_kill() {
+  local pane_id="$1"
+  # Send SIGTERM to the claude process, then kill the pane
+  local pane_pid
+  pane_pid=$(tmux display-message -t "$pane_id" -p '#{pane_pid}' 2>/dev/null)
+  if [[ -n "$pane_pid" ]]; then
+    # Kill claude child processes first
+    pkill -TERM -P "$pane_pid" -f "claude" 2>/dev/null || true
+    sleep 0.3
+    tmux kill-pane -t "$pane_id" 2>/dev/null || true
+  fi
+}
+
 action_switch() {
   local pane_id="$1"
   # Get the session:window.pane target from the pane_id
@@ -105,6 +103,15 @@ action_switch() {
   target=$(tmux display-message -t "$pane_id" -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null)
   if [[ -n "$target" ]]; then
     tmux switch-client -t "$target"
+  fi
+}
+
+action_new_session() {
+  local dir="$1"
+  if [[ -n "$dir" && -d "$dir" ]]; then
+    local session_name
+    session_name=$(tmux display-message -p '#{session_name}' 2>/dev/null)
+    tmux new-window -t "$session_name" -c "$dir" "claude"
   fi
 }
 
@@ -121,6 +128,7 @@ if [[ "${1:-}" == "--action" ]]; then
     send)    action_send_prompt "$pane_id" "$*" ;;
     preview) action_preview "$pane_id" ;;
     switch)  action_switch "$pane_id" ;;
+    kill)    action_kill "$pane_id" ;;
   esac
   exit 0
 fi
@@ -148,6 +156,21 @@ if [[ "${1:-}" == "--send-popup" ]]; then
   exit 0
 fi
 
+# New session: zoxide directory picker → spawn claude in new tmux window
+if [[ "${1:-}" == "--new-session" ]]; then
+  DIR=$(zoxide query -l | fzf \
+    --prompt="directory › " \
+    --header="Pick a directory to start Claude in" \
+    --header-first \
+    --preview="ls -la --color=always {}" \
+    --preview-window="right:60%:wrap" \
+    || true)
+  if [[ -n "$DIR" ]]; then
+    action_new_session "$DIR"
+  fi
+  exit 0
+fi
+
 # Reload: re-scan panes and output for fzf
 if [[ "${1:-}" == "--reload" ]]; then
   find_claude_panes
@@ -167,23 +190,41 @@ if [[ "${GROVE_PICKER_INNER:-}" == "1" ]]; then
     exit 0
   fi
 
+  # Background process to auto-refresh the preview every 1s via fzf --listen
+  FZF_PORT=$((10000 + RANDOM % 50000))
+  (
+    sleep 0.5  # wait for fzf to start
+    while true; do
+      curl -s "localhost:$FZF_PORT" -d 'refresh-preview' >/dev/null 2>&1 || break
+      sleep 1
+    done
+  ) &
+  REFRESH_PID=$!
+  trap "kill $REFRESH_PID 2>/dev/null" EXIT
+
   # fzf with keybindings
   # Field 1 is pane_id (tab-separated), field 2+ is display
   SELECTED=$(echo "$PANES" | fzf \
+    --listen "$FZF_PORT" \
     --ansi \
     --no-multi \
     --delimiter=$'\t' \
     --with-nth=2 \
-    --header="enter:switch  ctrl-a:accept  ctrl-r:reject  ctrl-p:send query  ctrl-l:refresh" \
+    --header="enter:switch  ctrl-y:accept  ctrl-r:reject  ctrl-x:kill  ctrl-n:new  ctrl-p:send query  ctrl-l:refresh" \
     --header-first \
     --prompt="› " \
     --preview="$SELF --preview {1}" \
     --preview-window="right:60%:wrap:follow" \
-    --bind="ctrl-a:execute-silent($SELF --action accept {1})+reload($SELF --reload)" \
+    --bind="ctrl-y:execute-silent($SELF --action accept {1})+reload($SELF --reload)" \
     --bind="ctrl-r:execute-silent($SELF --action reject {1})+reload($SELF --reload)" \
+    --bind="ctrl-x:execute-silent($SELF --action kill {1})+reload($SELF --reload)" \
+    --bind="ctrl-n:execute($SELF --new-session)+reload($SELF --reload)" \
     --bind="ctrl-p:execute($SELF --send-popup {1})+reload($SELF --reload)" \
     --bind="ctrl-l:reload($SELF --reload)" \
+    --bind="j:down,k:up" \
     || true)
+
+  kill $REFRESH_PID 2>/dev/null || true
 
   if [[ -z "$SELECTED" ]]; then
     exit 0
