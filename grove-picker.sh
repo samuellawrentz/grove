@@ -17,13 +17,14 @@ POPUP_WIDTH="95%"
 POPUP_HEIGHT="95%"
 POLL_LINES=50
 STATE_LINES=10
+STATE_FILE="/tmp/claude-panes.json"
 
 # --- Claude state detection ---
 
 # Read state from shared hook-written JSON (set by claude-tmux-status.sh)
 detect_claude_state() {
   local pane_id="$1"
-  jq -r --arg p "$pane_id" '.[$p].state // "active"' /tmp/claude-panes.json 2>/dev/null || echo "active"
+  jq -r --arg p "$pane_id" '.[$p].state // "active"' "$STATE_FILE" 2>/dev/null || echo "active"
 }
 
 get_pane_preview() {
@@ -111,7 +112,7 @@ action_new_session() {
   if [[ -n "$dir" && -d "$dir" ]]; then
     local session_name
     session_name=$(tmux display-message -p '#{session_name}' 2>/dev/null)
-    tmux new-window -t "$session_name" -c "$dir" "claude"
+    tmux new-window -t "$session_name" -c "$dir" "claude --dangerously-skip-permissions"
   fi
 }
 
@@ -218,7 +219,7 @@ if [[ "${GROVE_PICKER_INNER:-}" == "1" ]]; then
     --bind="ctrl-y:execute-silent($SELF --action accept {1})+reload($SELF --reload)" \
     --bind="ctrl-r:execute-silent($SELF --action reject {1})+reload($SELF --reload)" \
     --bind="ctrl-x:execute-silent($SELF --action kill {1})+reload($SELF --reload)" \
-    --bind="ctrl-n:execute($SELF --new-session)+reload($SELF --reload)" \
+    --bind="ctrl-n:become($SELF --new-session)" \
     --bind="ctrl-p:execute($SELF --send-popup {1})+reload($SELF --reload)" \
     --bind="ctrl-l:reload($SELF --reload)" \
     --bind="j:down,k:up" \
