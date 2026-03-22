@@ -45,8 +45,8 @@ pub enum Commands {
 
     /// Create a task with worktrees from registered repos
     Init {
-        /// Task identifier
-        task_id: String,
+        /// Task identifier (prompted in interactive mode if omitted)
+        task_id: Option<String>,
         /// Repository names to include
         repos: Vec<String>,
         /// Context text for CONTEXT.md

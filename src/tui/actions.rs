@@ -3,7 +3,7 @@ use crossterm::event::KeyEvent;
 use crate::claude::ClaudeState;
 use crate::tmux;
 
-use super::app::{App, Focus};
+use super::app::App;
 
 /// Handle a key event in the TUI.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
@@ -15,6 +15,54 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     // Ctrl-C always quits
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
+        return;
+    }
+
+    // Search input mode
+    if let Some(ref mut query) = app.search_input {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
+                    let _ = tmux::switch_to_pane(&pane_id, app.verbose);
+                    app.should_quit = true;
+                }
+                app.search_input = None;
+                app.tree.search_filter = None;
+            }
+            KeyCode::Esc => {
+                app.search_input = None;
+                app.tree.search_filter = None;
+            }
+            KeyCode::Down => {
+                app.tree.move_cursor_to_pane(true);
+                update_scroll(app);
+                app.refresh_preview();
+            }
+            KeyCode::Up => {
+                app.tree.move_cursor_to_pane(false);
+                update_scroll(app);
+                app.refresh_preview();
+            }
+            KeyCode::Char(c) => {
+                query.push(c);
+                app.tree.search_filter = Some(query.clone());
+                app.tree.jump_first_pane();
+                update_scroll(app);
+                app.refresh_preview();
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                app.tree.search_filter = if query.is_empty() {
+                    None
+                } else {
+                    Some(query.clone())
+                };
+                app.tree.jump_first_pane();
+                update_scroll(app);
+                app.refresh_preview();
+            }
+            _ => {}
+        }
         return;
     }
 
@@ -51,27 +99,31 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.should_quit = true;
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            app.tree.move_cursor(1);
+            app.tree.move_cursor_to_pane(true);
             update_scroll(app);
+            app.preview_scroll_up = 0;
+            app.refresh_preview();
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.tree.move_cursor(-1);
+            app.tree.move_cursor_to_pane(false);
             update_scroll(app);
+            app.preview_scroll_up = 0;
+            app.refresh_preview();
+        }
+        KeyCode::Char('J') => {
+            app.preview_scroll_up = app.preview_scroll_up.saturating_sub(3);
+        }
+        KeyCode::Char('K') => {
+            app.preview_scroll_up = app.preview_scroll_up.saturating_add(3);
         }
         KeyCode::Char('h') | KeyCode::Left => {
-            app.tree.toggle_expand();
+            app.tree.collapse_current_group();
             update_scroll(app);
         }
         KeyCode::Char('l') | KeyCode::Right => {
-            app.tree.toggle_expand();
+            app.tree.expand_current_group();
             update_scroll(app);
-        }
-        KeyCode::Tab => {
-            app.toggle_focus();
-            // Refresh preview when switching to preview panel
-            if matches!(app.focus, Focus::Preview) {
-                app.refresh_preview();
-            }
+            app.refresh_preview();
         }
         KeyCode::Enter => {
             if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
@@ -93,8 +145,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             if let Some(pane) = app.tree.selected_pane()
                 && pane.claude_state == Some(ClaudeState::Waiting)
             {
-                let _ =
-                    tmux::send_raw_keys(&pane.pane_info.pane_id, &["n", "Enter"], app.verbose);
+                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, &["n", "Enter"], app.verbose);
                 app.refresh_tree();
             }
         }
@@ -104,19 +155,29 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                 app.prompt_input = Some(String::new());
             }
         }
+        KeyCode::Char('/') => {
+            app.search_input = Some(String::new());
+        }
+        KeyCode::Char('x') => {
+            if let Some(pane) = app.tree.selected_pane() {
+                let pane_id = pane.pane_info.pane_id.clone();
+                let _ = tmux::kill_pane(&pane_id, app.verbose);
+                app.refresh_tree();
+                app.refresh_preview();
+            }
+        }
         KeyCode::Char('n') => {
-            app.status_message = Some("Run `grove init -i` in another pane".to_string());
+            app.pending_popup = Some("grove init -i".to_string());
         }
         KeyCode::Char('g') => {
-            app.tree.cursor = 0;
+            app.tree.jump_first_pane();
             update_scroll(app);
+            app.refresh_preview();
         }
         KeyCode::Char('G') => {
-            let count = app.tree.visible_count();
-            if count > 0 {
-                app.tree.cursor = count - 1;
-            }
+            app.tree.jump_last_pane();
             update_scroll(app);
+            app.refresh_preview();
         }
         _ => {}
     }

@@ -251,7 +251,8 @@ pub fn run(
 
     // Auto-attach AFTER state save (select_window doesn't block like attach_session)
     if let Some(ref target) = tmux_window
-        && config.auto_attach && !opts.no_attach
+        && config.auto_attach
+        && !opts.no_attach
     {
         let _ = tmux::select_window(target, verbose);
     }

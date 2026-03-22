@@ -2,9 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::app::{App, Focus};
+use super::app::App;
 use crate::claude::ClaudeState;
 
 /// Draw the TUI frame.
@@ -20,12 +20,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let focused = matches!(app.focus, Focus::Tree);
-    let border_style = if focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let border_style = Style::default().fg(Color::Cyan);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
@@ -47,10 +42,18 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     for group in &app.tree.groups {
         let arrow = if group.expanded { "▼" } else { "▶" };
+        let group_has_matches = group
+            .panes
+            .iter()
+            .any(|p| app.tree.pane_matches(p, &group.name));
         let header_style = if row_idx == app.tree.cursor {
             Style::default()
                 .add_modifier(Modifier::BOLD)
                 .bg(Color::DarkGray)
+        } else if !group_has_matches {
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::DarkGray)
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         };
@@ -76,8 +79,11 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     pane.pane_info.current_command,
                 );
 
+                let matches = app.tree.pane_matches(pane, &group.name);
                 let style = if row_idx == app.tree.cursor {
                     Style::default().bg(Color::DarkGray)
+                } else if !matches {
+                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default()
                 };
@@ -102,12 +108,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let focused = matches!(app.focus, Focus::Preview);
-    let border_style = if focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let border_style = Style::default().fg(Color::DarkGray);
 
     let title = if let Some(pane_id) = app.tree.selected_pane_id() {
         format!(" Preview -- {pane_id} ")
@@ -120,14 +121,32 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .border_style(border_style)
         .title(title);
 
-    let preview = Paragraph::new(app.preview_content.as_str())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let inner = block.inner(area);
+    use ansi_to_tui::IntoText as _;
+    let text = app
+        .preview_content
+        .into_text()
+        .unwrap_or_else(|_| ratatui::text::Text::raw(&app.preview_content));
+    let line_count = text.lines.len();
+    let visible_height = inner.height as usize;
+    let max_scroll = if line_count > visible_height {
+        (line_count - visible_height) as u16
+    } else {
+        0
+    };
+    let scroll = max_scroll.saturating_sub(app.preview_scroll_up);
+    let preview = Paragraph::new(text).block(block).scroll((scroll, 0));
     f.render_widget(preview, area);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let content = if let Some(ref input) = app.prompt_input {
+    let content = if let Some(ref query) = app.search_input {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::Cyan)),
+            Span::raw(query.as_str()),
+            Span::styled("_", Style::default().fg(Color::Cyan)),
+        ])
+    } else if let Some(ref input) = app.prompt_input {
         Line::from(vec![
             Span::styled("Send: ", Style::default().fg(Color::Cyan)),
             Span::raw(input.as_str()),
@@ -140,7 +159,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ))
     } else {
         Line::from(Span::styled(
-            "j/k:nav  h/l:fold  Tab:panel  Enter:switch  a:accept  r:reject  s:send  n:new  q:quit",
+            "j/k:nav  J/K:scroll  h/l:fold  /:search  Enter:switch  a:accept  r:reject  s:send  n:new  x:close  q:quit",
             Style::default().fg(Color::DarkGray),
         ))
     };

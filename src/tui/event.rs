@@ -2,6 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{self, Event};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -50,7 +54,48 @@ pub(crate) fn run_event_loop(
                 }
                 _ => {}
             }
-        } else {
+        }
+
+        // Handle pending shell-out: suspend TUI, run command, resume
+        if let Some(cmd) = app.pending_popup.take() {
+            // Leave alternate screen and raw mode so the child can use the terminal
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+
+            // Run command directly as a child process (like vim :!)
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .status();
+
+            match &status {
+                Ok(s) if !s.success() => {
+                    eprintln!("\n[grove] command exited with {s}");
+                }
+                Err(e) => {
+                    eprintln!("\n[grove] command failed: {e}");
+                }
+                _ => {}
+            }
+
+            // Wait for keypress so user can see output
+            eprintln!("[grove] Press Enter to return to TUI...");
+            let _ = std::io::stdin().read_line(&mut String::new());
+
+            if let Err(e) = status {
+                app.status_message = Some(format!("command failed: {e}"));
+            }
+
+            // Restore terminal state
+            let _ = enable_raw_mode();
+            let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+            terminal.clear().ok();
+
+            app.refresh_tree();
+            app.refresh_preview();
+        }
+
+        if !has_event {
             // Timeout: refresh data
             app.on_tick();
         }

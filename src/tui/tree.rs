@@ -24,6 +24,7 @@ pub(crate) struct TreeState {
     pub groups: Vec<TreeGroup>,
     pub cursor: usize,
     pub scroll_offset: usize,
+    pub search_filter: Option<String>,
 }
 
 impl TreeState {
@@ -40,6 +41,7 @@ impl TreeState {
             groups,
             cursor: 0,
             scroll_offset: 0,
+            search_filter: None,
         }
     }
 
@@ -92,6 +94,7 @@ impl TreeState {
     }
 
     /// Move cursor by delta, skipping collapsed children.
+    #[cfg(test)]
     pub fn move_cursor(&mut self, delta: i32) {
         let count = self.visible_count();
         if count == 0 {
@@ -108,6 +111,7 @@ impl TreeState {
     }
 
     /// Toggle expand/collapse for the group under the cursor.
+    #[cfg(test)]
     pub fn toggle_expand(&mut self) {
         let mut pos = 0;
         for group in &mut self.groups {
@@ -133,6 +137,143 @@ impl TreeState {
         }
         count
     }
+
+    /// Check if a pane matches the current search filter.
+    pub fn pane_matches(&self, pane: &TreePane, group_name: &str) -> bool {
+        match &self.search_filter {
+            Some(query) if !query.is_empty() => pane_matches_filter(pane, group_name, query),
+            _ => true,
+        }
+    }
+
+    /// Get positions of all visible pane rows (not group headers), respecting search filter.
+    fn pane_positions(&self) -> Vec<usize> {
+        let mut positions = Vec::new();
+        let mut pos = 0;
+        for group in &self.groups {
+            pos += 1; // group header
+            if group.expanded {
+                for pane in &group.panes {
+                    if self.pane_matches(pane, &group.name) {
+                        positions.push(pos);
+                    }
+                    pos += 1;
+                }
+            }
+        }
+        positions
+    }
+
+    /// Move cursor to the next or previous pane row, skipping group headers.
+    pub fn move_cursor_to_pane(&mut self, forward: bool) {
+        let positions = self.pane_positions();
+        if positions.is_empty() {
+            return;
+        }
+        if forward {
+            if let Some(&next) = positions.iter().find(|&&p| p > self.cursor) {
+                self.cursor = next;
+            }
+        } else {
+            if let Some(&prev) = positions.iter().rev().find(|&&p| p < self.cursor) {
+                self.cursor = prev;
+            }
+        }
+    }
+
+    /// Jump cursor to the first visible pane.
+    pub fn jump_first_pane(&mut self) {
+        let positions = self.pane_positions();
+        if let Some(&first) = positions.first() {
+            self.cursor = first;
+        }
+    }
+
+    /// Jump cursor to the last visible pane.
+    pub fn jump_last_pane(&mut self) {
+        let positions = self.pane_positions();
+        if let Some(&last) = positions.last() {
+            self.cursor = last;
+        }
+    }
+
+    /// Find the group index containing the cursor position.
+    fn cursor_group_index(&self) -> Option<usize> {
+        let mut pos = 0;
+        for (i, group) in self.groups.iter().enumerate() {
+            if pos == self.cursor {
+                return Some(i);
+            }
+            pos += 1;
+            if group.expanded {
+                for _ in &group.panes {
+                    if pos == self.cursor {
+                        return Some(i);
+                    }
+                    pos += 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// Collapse the group containing the cursor, moving cursor to group header.
+    pub fn collapse_current_group(&mut self) {
+        if let Some(group_idx) = self.cursor_group_index()
+            && self.groups[group_idx].expanded
+        {
+            let mut header_pos = 0;
+            for i in 0..group_idx {
+                header_pos += 1;
+                if self.groups[i].expanded {
+                    header_pos += self.groups[i].panes.len();
+                }
+            }
+            self.groups[group_idx].expanded = false;
+            self.cursor = header_pos;
+        }
+    }
+
+    /// Expand the group containing the cursor, moving cursor to its first pane.
+    pub fn expand_current_group(&mut self) {
+        if let Some(group_idx) = self.cursor_group_index()
+            && !self.groups[group_idx].expanded
+        {
+            self.groups[group_idx].expanded = true;
+            let mut first_pane_pos = 0;
+            for i in 0..group_idx {
+                first_pane_pos += 1;
+                if self.groups[i].expanded {
+                    first_pane_pos += self.groups[i].panes.len();
+                }
+            }
+            first_pane_pos += 1; // skip this group's header
+            if !self.groups[group_idx].panes.is_empty() {
+                self.cursor = first_pane_pos;
+            }
+        }
+    }
+}
+
+fn fuzzy_match(query: &str, target: &str) -> bool {
+    let mut target_chars = target.chars().flat_map(|c| c.to_lowercase());
+    for qc in query.chars().flat_map(|c| c.to_lowercase()) {
+        loop {
+            match target_chars.next() {
+                Some(tc) if tc == qc => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+fn pane_matches_filter(pane: &TreePane, group_name: &str, query: &str) -> bool {
+    fuzzy_match(query, &pane.pane_info.session_name)
+        || fuzzy_match(query, &pane.pane_info.current_command)
+        || fuzzy_match(query, group_name)
+        || fuzzy_match(query, &pane.pane_info.current_path.to_string_lossy())
 }
 
 fn build_groups(
@@ -146,6 +287,12 @@ fn build_groups(
 
     for pane in panes {
         if pane.pane_id == exclude_pane_id {
+            continue;
+        }
+
+        // Skip panes whose working directory no longer exists (e.g. deleted worktrees)
+        #[cfg(not(test))]
+        if !pane.current_path.exists() {
             continue;
         }
 
@@ -174,6 +321,7 @@ fn build_groups(
                 current_path: pane.current_path.clone(),
                 current_command: pane.current_command.clone(),
                 pid: pane.pid,
+                activity: pane.activity,
             },
             claude_state,
         };
@@ -188,11 +336,12 @@ fn build_groups(
     let mut groups: Vec<TreeGroup> = group_map
         .into_iter()
         .map(|(name, (path, mut panes))| {
-            // Sort panes by session_name, then window_index
+            // Sort panes by activity descending (most recent first), then session:window as tiebreaker
             panes.sort_by(|a, b| {
-                a.pane_info
-                    .session_name
-                    .cmp(&b.pane_info.session_name)
+                b.pane_info
+                    .activity
+                    .cmp(&a.pane_info.activity)
+                    .then(a.pane_info.session_name.cmp(&b.pane_info.session_name))
                     .then(a.pane_info.window_index.cmp(&b.pane_info.window_index))
             });
 
@@ -212,8 +361,22 @@ fn build_groups(
         })
         .collect();
 
-    // Sort groups alphabetically
-    groups.sort_by(|a, b| a.name.cmp(&b.name));
+    // Sort groups by most recent pane activity (most active first), alphabetical tiebreaker
+    groups.sort_by(|a, b| {
+        let a_max = a
+            .panes
+            .iter()
+            .map(|p| p.pane_info.activity)
+            .max()
+            .unwrap_or(0);
+        let b_max = b
+            .panes
+            .iter()
+            .map(|p| p.pane_info.activity)
+            .max()
+            .unwrap_or(0);
+        b_max.cmp(&a_max).then(a.name.cmp(&b.name))
+    });
     groups
 }
 
@@ -231,6 +394,7 @@ mod tests {
             current_path: PathBuf::from(path),
             current_command: cmd.to_string(),
             pid: 1000,
+            activity: 0,
         }
     }
 

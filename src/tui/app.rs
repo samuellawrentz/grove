@@ -7,28 +7,21 @@ use super::source;
 use super::tree::TreeState;
 
 const TREE_POLL: Duration = Duration::from_secs(5);
-const PREVIEW_POLL: Duration = Duration::from_millis(200);
-const PREVIEW_IDLE_POLL: Duration = Duration::from_secs(2);
-const IDLE_THRESHOLD: Duration = Duration::from_secs(30);
-
-/// Which panel has focus.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Focus {
-    Tree,
-    Preview,
-}
 
 /// Main application state for the TUI.
 pub(crate) struct App {
     pub tree: TreeState,
-    pub focus: Focus,
     pub preview_content: String,
     pub last_interaction: Instant,
     pub should_quit: bool,
     pub verbose: bool,
+    pub search_input: Option<String>,
     pub prompt_input: Option<String>,
     pub status_message: Option<String>,
+    #[allow(dead_code)]
     pub my_pane_id: String,
+    pub pending_popup: Option<String>,
+    pub preview_scroll_up: u16,
 }
 
 impl App {
@@ -46,8 +39,9 @@ impl App {
                 groups: Vec::new(),
                 cursor: 0,
                 scroll_offset: 0,
+                search_filter: None,
             },
-            focus: Focus::Tree,
+            search_input: None,
             preview_content: String::new(),
             last_interaction: Instant::now(),
             should_quit: false,
@@ -55,9 +49,13 @@ impl App {
             prompt_input: None,
             status_message: None,
             my_pane_id,
+            pending_popup: None,
+            preview_scroll_up: 0,
         };
 
         app.refresh_tree();
+        app.tree.jump_first_pane();
+        app.refresh_preview();
         Ok(app)
     }
 
@@ -68,7 +66,7 @@ impl App {
             source::fetch_claude_states(),
         ) {
             (Ok(panes), Ok(states)) => {
-                self.tree.rebuild(&panes, &states, &self.my_pane_id);
+                self.tree.rebuild(&panes, &states, "");
                 self.status_message = None;
             }
             (Err(e), _) | (_, Err(e)) => {
@@ -91,37 +89,14 @@ impl App {
         }
     }
 
-    /// Get the poll timeout based on focus and idle state.
+    /// Get the poll timeout.
     pub fn poll_timeout(&self) -> Duration {
-        match self.focus {
-            Focus::Tree => TREE_POLL,
-            Focus::Preview => {
-                if self.last_interaction.elapsed() > IDLE_THRESHOLD {
-                    PREVIEW_IDLE_POLL
-                } else {
-                    PREVIEW_POLL
-                }
-            }
-        }
+        TREE_POLL
     }
 
     /// Called on each tick (timeout expiry) to refresh data.
     pub fn on_tick(&mut self) {
-        match self.focus {
-            Focus::Tree => {
-                self.refresh_tree();
-            }
-            Focus::Preview => {
-                self.refresh_preview();
-            }
-        }
-    }
-
-    /// Toggle focus between Tree and Preview.
-    pub fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Tree => Focus::Preview,
-            Focus::Preview => Focus::Tree,
-        };
+        self.refresh_tree();
+        self.refresh_preview();
     }
 }

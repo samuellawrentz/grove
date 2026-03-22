@@ -57,6 +57,22 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             no_claude,
             no_attach,
         } => {
+            let task_id = match task_id {
+                Some(id) => id,
+                None => {
+                    if !interactive {
+                        return Err(GroveError::General(
+                            "task_id is required (use -i for interactive mode)".to_string(),
+                        ));
+                    }
+                    dialoguer::Input::new()
+                        .with_prompt("Task ID")
+                        .interact_text()
+                        .map_err(|e| {
+                            GroveError::General(format!("interactive input failed: {e}"))
+                        })?
+                }
+            };
             let opts = commands::init::InitOptions {
                 repos: &repos,
                 context: context.as_deref(),
