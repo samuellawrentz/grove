@@ -1,9 +1,9 @@
 use crossterm::event::KeyEvent;
 
 use crate::claude::ClaudeState;
-use crate::tmux;
+use crate::{recents, tmux};
 
-use super::app::App;
+use super::app::{App, FzfAction, SidebarFocus};
 
 /// Handle a key event in the TUI.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
@@ -93,11 +93,54 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Normal mode
+    // Global keys (work in both panes)
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.should_quit = true;
+            return;
         }
+        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.sidebar_focus = SidebarFocus::Tree;
+            return;
+        }
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.sidebar_focus = SidebarFocus::Recents;
+            return;
+        }
+        KeyCode::Char('J') => {
+            app.preview_scroll_up = app.preview_scroll_up.saturating_sub(3);
+            return;
+        }
+        KeyCode::Char('K') => {
+            app.preview_scroll_up = app.preview_scroll_up.saturating_add(3);
+            return;
+        }
+        KeyCode::Char('/') => {
+            app.search_input = Some(String::new());
+            return;
+        }
+        KeyCode::Char('N') => {
+            app.pending_fzf = Some(FzfAction::Claude);
+            return;
+        }
+        KeyCode::Char('t') => {
+            app.pending_fzf = Some(FzfAction::Terminal);
+            return;
+        }
+        _ => {}
+    }
+
+    // Dispatch to focused pane
+    match app.sidebar_focus {
+        SidebarFocus::Tree => handle_tree_key(app, key),
+        SidebarFocus::Recents => handle_recents_key(app, key),
+    }
+}
+
+fn handle_tree_key(app: &mut App, key: KeyEvent) {
+    use crossterm::event::KeyCode;
+
+    match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             app.tree.move_cursor_to_pane(true);
             update_scroll(app);
@@ -110,17 +153,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.preview_scroll_up = 0;
             app.refresh_preview();
         }
-        KeyCode::Char('J') => {
-            app.preview_scroll_up = app.preview_scroll_up.saturating_sub(3);
-        }
-        KeyCode::Char('K') => {
-            app.preview_scroll_up = app.preview_scroll_up.saturating_add(3);
-        }
-        KeyCode::Char('h') | KeyCode::Left => {
+        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
             app.tree.collapse_current_group();
             update_scroll(app);
         }
-        KeyCode::Char('l') | KeyCode::Right => {
+        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
             app.tree.expand_current_group();
             update_scroll(app);
             app.refresh_preview();
@@ -132,7 +169,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('a') => {
-            // Accept: send Enter to a waiting Claude pane
             if let Some(pane) = app.tree.selected_pane()
                 && pane.claude_state == Some(ClaudeState::Waiting)
             {
@@ -141,7 +177,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('r') => {
-            // Reject: send "n" + Enter to a waiting Claude pane
             if let Some(pane) = app.tree.selected_pane()
                 && pane.claude_state == Some(ClaudeState::Waiting)
             {
@@ -150,13 +185,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('s') => {
-            // Enter prompt input mode
             if app.tree.selected_pane().is_some() {
                 app.prompt_input = Some(String::new());
             }
-        }
-        KeyCode::Char('/') => {
-            app.search_input = Some(String::new());
         }
         KeyCode::Char('x') => {
             if let Some(pane) = app.tree.selected_pane() {
@@ -168,6 +199,22 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('n') => {
             app.pending_popup = Some("grove init -i".to_string());
+        }
+        KeyCode::Char('e') => {
+            if let Some((target, cwd)) = selected_target_cwd(app) {
+                launch_split(app, &target, &cwd, Some("nvim ."));
+            }
+        }
+        KeyCode::Char('C') => {
+            let cmd = app.claude_command.clone();
+            if let Some((target, cwd)) = selected_target_cwd(app) {
+                launch_split(app, &target, &cwd, Some(&cmd));
+            }
+        }
+        KeyCode::Char('T') => {
+            if let Some((target, cwd)) = selected_target_cwd(app) {
+                launch_split(app, &target, &cwd, None);
+            }
         }
         KeyCode::Char('g') => {
             app.tree.jump_first_pane();
@@ -183,13 +230,100 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_recents_key(app: &mut App, key: KeyEvent) {
+    use crossterm::event::KeyCode;
+
+    if app.recents.is_empty() {
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.recents_cursor + 1 < app.recents.len() {
+                app.recents_cursor += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.recents_cursor = app.recents_cursor.saturating_sub(1);
+        }
+        KeyCode::Char('c') | KeyCode::Enter => {
+            let dir = app.recents[app.recents_cursor]
+                .path
+                .to_string_lossy()
+                .to_string();
+            let cmd = format!("{} -c", app.claude_command);
+            launch_in_new_window(app, &dir, Some(&cmd));
+        }
+        KeyCode::Char('n') => {
+            let dir = app.recents[app.recents_cursor]
+                .path
+                .to_string_lossy()
+                .to_string();
+            let cmd = app.claude_command.clone();
+            launch_in_new_window(app, &dir, Some(&cmd));
+        }
+        KeyCode::Char('x') => {
+            recents::remove(app.recents_cursor);
+            app.refresh_recents();
+        }
+        KeyCode::Char('g') => {
+            app.recents_cursor = 0;
+        }
+        KeyCode::Char('G') => {
+            if !app.recents.is_empty() {
+                app.recents_cursor = app.recents.len() - 1;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Get target pane ID and cwd from the selected pane or group header.
+fn selected_target_cwd(app: &App) -> Option<(String, String)> {
+    if let Some(pane) = app.tree.selected_pane() {
+        let cwd = pane.pane_info.current_path.to_string_lossy().to_string();
+        let target = pane.pane_info.pane_id.clone();
+        Some((target, cwd))
+    } else if let Some(group) = app.tree.selected_group() {
+        group.panes.first().map(|first_pane| {
+            let cwd = group.path.to_string_lossy().to_string();
+            let target = first_pane.pane_info.pane_id.clone();
+            (target, cwd)
+        })
+    } else {
+        None
+    }
+}
+
+/// Split a window and switch to it.
+fn launch_split(app: &mut App, target: &str, cwd: &str, cmd: Option<&str>) {
+    match tmux::split_window(target, cwd, cmd, app.verbose) {
+        Ok(new_pane_id) => {
+            let _ = tmux::switch_to_pane(&new_pane_id, app.verbose);
+            app.should_quit = true;
+        }
+        Err(e) => {
+            app.status_message = Some(format!("split failed: {e}"));
+        }
+    }
+}
+
+/// Create a new tmux window and switch to it.
+fn launch_in_new_window(app: &mut App, dir: &str, cmd: Option<&str>) {
+    match tmux::new_window(dir, cmd, app.verbose) {
+        Ok(pane_id) => {
+            let _ = tmux::switch_to_pane(&pane_id, app.verbose);
+            app.should_quit = true;
+        }
+        Err(e) => {
+            app.status_message = Some(format!("new window failed: {e}"));
+        }
+    }
+}
+
 /// Keep scroll_offset in sync with cursor position.
 fn update_scroll(app: &mut App) {
-    // We don't know the exact visible height here (it depends on the terminal size),
-    // but we can ensure the cursor is always within a reasonable scroll window.
-    // The ui.rs draw_tree function will use scroll_offset to render.
-    // We use a simple heuristic: keep cursor visible in a window of ~20 rows.
-    let visible_height = 20_usize; // approximate; ui.rs adjusts at render time
+    let visible_height = 20_usize;
 
     if app.tree.cursor < app.tree.scroll_offset {
         app.tree.scroll_offset = app.tree.cursor;

@@ -33,6 +33,7 @@ impl TestFixture {
         let config = serde_json::json!({
             "repos_dir": repos_dir,
             "tasks_dir": tasks_dir,
+            "auto_launch_claude": false,
         });
         std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 

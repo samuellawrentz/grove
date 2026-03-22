@@ -57,6 +57,9 @@ pub(crate) fn run(verbose: bool) -> Result<(), GroveError> {
     let mut terminal = Terminal::new(backend)
         .map_err(|e| GroveError::Tui(format!("failed to create terminal: {e}")))?;
 
+    // Register tmux hooks to track recents
+    crate::tmux::register_recents_hooks(verbose);
+
     let mut app = app::App::new(verbose)?;
 
     let result = event::run_event_loop(&mut terminal, &mut app);

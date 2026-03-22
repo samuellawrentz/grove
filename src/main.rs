@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod git;
 mod output;
+mod recents;
 mod state;
 mod tmux;
 mod tui;
@@ -110,6 +111,9 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                 ));
             }
             tui::run(verbose)?;
+        }
+        Commands::RecentsAdd { dir } => {
+            recents::add(&dir);
         }
         Commands::Add {
             task_id,

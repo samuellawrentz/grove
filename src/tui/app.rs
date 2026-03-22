@@ -1,12 +1,26 @@
 use std::time::{Duration, Instant};
 
+use crate::config::GroveConfig;
 use crate::error::GroveError;
+use crate::recents::{self, RecentEntry};
 use crate::tmux;
 
 use super::source;
 use super::tree::TreeState;
 
 const TREE_POLL: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarFocus {
+    Tree,
+    Recents,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FzfAction {
+    Claude,
+    Terminal,
+}
 
 /// Main application state for the TUI.
 pub(crate) struct App {
@@ -21,7 +35,12 @@ pub(crate) struct App {
     #[allow(dead_code)]
     pub my_pane_id: String,
     pub pending_popup: Option<String>,
+    pub pending_fzf: Option<FzfAction>,
     pub preview_scroll_up: u16,
+    pub claude_command: String,
+    pub sidebar_focus: SidebarFocus,
+    pub recents: Vec<RecentEntry>,
+    pub recents_cursor: usize,
 }
 
 impl App {
@@ -33,6 +52,10 @@ impl App {
         } else {
             my_pane_id
         };
+
+        let claude_command = GroveConfig::load(None, None, None, None)
+            .map(|(c, _)| c.claude_command)
+            .unwrap_or_else(|_| "claude".to_string());
 
         let mut app = App {
             tree: TreeState {
@@ -50,7 +73,12 @@ impl App {
             status_message: None,
             my_pane_id,
             pending_popup: None,
+            pending_fzf: None,
             preview_scroll_up: 0,
+            claude_command,
+            sidebar_focus: SidebarFocus::Tree,
+            recents: recents::load(),
+            recents_cursor: 0,
         };
 
         app.refresh_tree();
@@ -86,6 +114,16 @@ impl App {
                     self.status_message = Some(format!("Preview error: {e}"));
                 }
             }
+        } else if let Some(group) = self.tree.selected_group() {
+            let path = group.path.clone();
+            match source::fetch_directory_listing(&path) {
+                Ok(listing) => {
+                    self.preview_content = listing;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Directory error: {e}"));
+                }
+            }
         }
     }
 
@@ -94,9 +132,18 @@ impl App {
         TREE_POLL
     }
 
+    /// Refresh the recents list from disk.
+    pub fn refresh_recents(&mut self) {
+        self.recents = recents::load();
+        if self.recents_cursor >= self.recents.len() && !self.recents.is_empty() {
+            self.recents_cursor = self.recents.len() - 1;
+        }
+    }
+
     /// Called on each tick (timeout expiry) to refresh data.
     pub fn on_tick(&mut self) {
         self.refresh_tree();
+        self.refresh_recents();
         self.refresh_preview();
     }
 }

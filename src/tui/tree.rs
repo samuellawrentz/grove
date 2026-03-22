@@ -253,6 +253,27 @@ impl TreeState {
             }
         }
     }
+
+    /// Get the group under the cursor, if the cursor is on a group header.
+    pub fn selected_group(&self) -> Option<&TreeGroup> {
+        let mut pos = 0;
+        for group in &self.groups {
+            if pos == self.cursor {
+                return Some(group);
+            }
+            pos += 1;
+            if group.expanded {
+                pos += group.panes.len();
+            }
+        }
+        None
+    }
+
+    /// Get the group containing the cursor, whether on a header or a pane row.
+    #[allow(dead_code)]
+    pub fn cursor_group(&self) -> Option<&TreeGroup> {
+        self.cursor_group_index().map(|i| &self.groups[i])
+    }
 }
 
 fn fuzzy_match(query: &str, target: &str) -> bool {
@@ -286,7 +307,7 @@ fn build_groups(
     let mut group_map: HashMap<String, (PathBuf, Vec<TreePane>)> = HashMap::new();
 
     for pane in panes {
-        if pane.pane_id == exclude_pane_id {
+        if pane.pane_id == exclude_pane_id || pane.current_command == "grove" {
             continue;
         }
 

@@ -109,7 +109,7 @@ fn default_auto_attach() -> bool {
     true
 }
 fn default_claude_command() -> String {
-    "claude".to_string()
+    "claude --dangerously-skip-permissions".to_string()
 }
 
 impl Default for GroveConfig {

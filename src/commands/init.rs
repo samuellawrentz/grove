@@ -297,7 +297,7 @@ fn create_tmux_window(
             eprintln!("tmux window '{window_name}' already exists, reusing");
         }
     } else {
-        tmux::new_window(&session, &window_name, task_dir, verbose)?;
+        tmux::new_named_window(&session, &window_name, task_dir, verbose)?;
     }
 
     let pane_id = tmux::get_pane_id(&window_target, verbose)?;

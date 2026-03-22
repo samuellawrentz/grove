@@ -64,8 +64,8 @@ pub fn current_session(verbose: bool) -> Result<String, GroveError> {
     run_tmux(&["display-message", "-p", "#{session_name}"], verbose)
 }
 
-/// Create a new window in a session with the given name and working directory.
-pub fn new_window(
+/// Create a named window in a specific session with a working directory.
+pub fn new_named_window(
     session: &str,
     window_name: &str,
     cwd: &Path,
@@ -187,6 +187,66 @@ pub fn switch_to_pane(pane_id: &str, verbose: bool) -> Result<(), GroveError> {
 pub fn kill_pane(pane_id: &str, verbose: bool) -> Result<(), GroveError> {
     run_tmux(&["kill-pane", "-t", pane_id], verbose)?;
     Ok(())
+}
+
+/// Create a vertical split next to a target pane.
+/// If `cmd` is Some, runs that command; otherwise spawns the default shell.
+/// Equalizes pane sizes after splitting. Returns the new pane's ID.
+pub fn split_window(
+    target_pane: &str,
+    cwd: &str,
+    cmd: Option<&str>,
+    verbose: bool,
+) -> Result<String, GroveError> {
+    let mut args = vec![
+        "split-window",
+        "-h",
+        "-t",
+        target_pane,
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ];
+    if let Some(c) = cmd {
+        args.push(c);
+    }
+    let new_pane_id = run_tmux(&args, verbose)?;
+    let _ = run_tmux(
+        &["select-layout", "-t", target_pane, "even-horizontal"],
+        verbose,
+    );
+    Ok(new_pane_id)
+}
+
+/// Create a new window in the current session.
+/// If `cmd` is Some, runs that command; otherwise spawns the default shell.
+/// Returns the new pane's ID.
+pub fn new_window(cwd: &str, cmd: Option<&str>, verbose: bool) -> Result<String, GroveError> {
+    let mut args = vec!["new-window", "-c", cwd, "-P", "-F", "#{pane_id}"];
+    if let Some(c) = cmd {
+        args.push(c);
+    }
+    run_tmux(&args, verbose)
+}
+
+/// Register tmux hooks to record new windows/panes in grove recents.
+pub fn register_recents_hooks(verbose: bool) {
+    let grove_bin = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "grove".to_string());
+
+    let events = [
+        "after-new-window",
+        "after-split-window",
+        "after-new-session",
+    ];
+
+    for event in &events {
+        let cmd = format!("run-shell -b '{grove_bin} recents-add #{{pane_current_path}}'");
+        let _ = run_tmux(&["set-hook", "-g", event, &cmd], verbose);
+    }
 }
 
 /// Send raw keys to a tmux target (no -l flag, for keys like Enter).

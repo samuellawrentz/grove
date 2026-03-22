@@ -15,6 +15,23 @@ use super::actions;
 use super::app::App;
 use super::ui;
 
+/// Suspend the TUI, run a closure, then restore the terminal.
+fn suspend_tui<F, R>(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _ = disable_raw_mode();
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+
+    let result = f();
+
+    let _ = enable_raw_mode();
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+    terminal.clear().ok();
+
+    result
+}
+
 /// Run the main event loop.
 pub(crate) fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -58,38 +75,70 @@ pub(crate) fn run_event_loop(
 
         // Handle pending shell-out: suspend TUI, run command, resume
         if let Some(cmd) = app.pending_popup.take() {
-            // Leave alternate screen and raw mode so the child can use the terminal
-            let _ = disable_raw_mode();
-            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            suspend_tui(terminal, || {
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .status();
 
-            // Run command directly as a child process (like vim :!)
-            let status = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .status();
-
-            match &status {
-                Ok(s) if !s.success() => {
-                    eprintln!("\n[grove] command exited with {s}");
+                match &status {
+                    Ok(s) if !s.success() => {
+                        eprintln!("\n[grove] command exited with {s}");
+                    }
+                    Err(e) => {
+                        eprintln!("\n[grove] command failed: {e}");
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    eprintln!("\n[grove] command failed: {e}");
+
+                eprintln!("[grove] Press Enter to return to TUI...");
+                let _ = std::io::stdin().read_line(&mut String::new());
+
+                if let Err(e) = status {
+                    app.status_message = Some(format!("command failed: {e}"));
                 }
-                _ => {}
+            });
+
+            app.refresh_tree();
+            app.refresh_preview();
+        }
+
+        // Handle fzf directory picker
+        if let Some(action) = app.pending_fzf.take() {
+            use super::app::FzfAction;
+
+            let cmd = match action {
+                FzfAction::Claude => Some(app.claude_command.clone()),
+                FzfAction::Terminal => None,
+            };
+            let verbose = app.verbose;
+
+            let result = suspend_tui(terminal, || {
+                std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("zoxide query -l | fzf --prompt='Directory> '")
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::inherit())
+                    .output()
+            });
+
+            if let Ok(output) = result
+                && output.status.success()
+            {
+                let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !dir.is_empty() {
+                    match crate::tmux::new_window(&dir, cmd.as_deref(), verbose) {
+                        Ok(pane_id) => {
+                            let _ = crate::tmux::switch_to_pane(&pane_id, verbose);
+                            app.should_quit = true;
+                        }
+                        Err(e) => {
+                            app.status_message = Some(format!("new window failed: {e}"));
+                        }
+                    }
+                }
             }
-
-            // Wait for keypress so user can see output
-            eprintln!("[grove] Press Enter to return to TUI...");
-            let _ = std::io::stdin().read_line(&mut String::new());
-
-            if let Err(e) = status {
-                app.status_message = Some(format!("command failed: {e}"));
-            }
-
-            // Restore terminal state
-            let _ = enable_raw_mode();
-            let _ = execute!(std::io::stdout(), EnterAlternateScreen);
-            terminal.clear().ok();
 
             app.refresh_tree();
             app.refresh_preview();

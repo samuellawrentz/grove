@@ -107,6 +107,13 @@ pub enum Commands {
     /// Interactive TUI pane manager
     Tui,
 
+    /// Record a directory in recents (used by tmux hooks)
+    #[command(name = "recents-add", hide = true)]
+    RecentsAdd {
+        /// Directory path
+        dir: String,
+    },
+
     /// Add a repo to an existing task
     Add {
         /// Task identifier
