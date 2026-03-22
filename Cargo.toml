@@ -11,6 +11,9 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 thiserror = "2"
 dialoguer = "0.12.0"
+ratatui = "0.29"
+crossterm = "0.28"
+signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

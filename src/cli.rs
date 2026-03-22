@@ -67,6 +67,9 @@ pub enum Commands {
         /// Skip Claude launch (default in Phase 1)
         #[arg(long)]
         no_claude: bool,
+        /// Skip auto-attach to tmux window
+        #[arg(long)]
+        no_attach: bool,
     },
 
     /// Close a task and remove its worktrees
@@ -80,4 +83,41 @@ pub enum Commands {
 
     /// List active tasks
     List,
+
+    /// Attach to a task's tmux window
+    Attach {
+        /// Task identifier
+        task_id: String,
+    },
+
+    /// Show task status with Claude state
+    Status {
+        /// Task identifier (omit for all tasks)
+        task_id: Option<String>,
+    },
+
+    /// Send a prompt to Claude in a task
+    Send {
+        /// Task identifier
+        task_id: String,
+        /// Prompt text to send
+        prompt: String,
+    },
+
+    /// Interactive TUI pane manager
+    Tui,
+
+    /// Add a repo to an existing task
+    Add {
+        /// Task identifier
+        task_id: String,
+        /// Repository name to add
+        repo: String,
+        /// Branch name (default: match existing task branch)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Base branch to create worktree from
+        #[arg(long)]
+        base: Option<String>,
+    },
 }

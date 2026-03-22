@@ -29,6 +29,12 @@ pub struct TaskEntry {
     pub path: PathBuf,
     pub repos: Vec<TaskRepo>,
     pub created_at: DateTime<Utc>,
+    /// Tmux window target (e.g. "mysession:grove-TASK-1")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_window: Option<String>,
+    /// Pane ID of the task window (e.g. "%42")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
 }
 
 impl TaskEntry {

@@ -20,6 +20,9 @@ pub enum GroveError {
 
     #[error("conflict: {0}")]
     Conflict(String),
+
+    #[error("{0}")]
+    Tui(String),
 }
 
 impl GroveError {
@@ -31,6 +34,7 @@ impl GroveError {
             GroveError::TmuxNotRunning(_) => 4,
             GroveError::UncommittedChanges(_) => 5,
             GroveError::Conflict(_) => 6,
+            GroveError::Tui(_) => 7,
         }
     }
 
@@ -42,6 +46,7 @@ impl GroveError {
             GroveError::TmuxNotRunning(_) => "tmux_not_running",
             GroveError::UncommittedChanges(_) => "uncommitted_changes",
             GroveError::Conflict(_) => "conflict",
+            GroveError::Tui(_) => "tui",
         }
     }
 

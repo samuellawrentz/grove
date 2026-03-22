@@ -46,6 +46,16 @@ pub fn run(
         }
     }
 
+    // Kill tmux window if present
+    if let Some(ref target) = task.tmux_window
+        && let Err(e) = crate::tmux::kill_window(target, verbose)
+    {
+        // Don't block close on tmux failure — window may already be gone
+        if verbose {
+            eprintln!("Warning: failed to kill tmux window: {e}");
+        }
+    }
+
     // Remove each worktree
     for task_repo in &task.repos {
         let bare_path = state

@@ -1,11 +1,13 @@
 use chrono::Utc;
 use dialoguer::{Input, MultiSelect};
 
+use crate::claude;
 use crate::config::GroveConfig;
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
 use crate::state::{GroveState, TaskEntry, TaskRepo};
+use crate::tmux;
 use crate::validation::validate_identifier;
 
 pub struct InitOptions<'a> {
@@ -14,6 +16,9 @@ pub struct InitOptions<'a> {
     pub branch: Option<&'a str>,
     pub base: Option<&'a str>,
     pub interactive: bool,
+    pub no_tmux: bool,
+    pub no_claude: bool,
+    pub no_attach: bool,
 }
 
 /// Interactive mode: prompt user to select repos and branch name.
@@ -205,21 +210,59 @@ pub fn run(
     };
     std::fs::write(task_dir.join("CONTEXT.md"), &context_content)?;
 
+    // --- Tmux window creation ---
+    let mut tmux_window: Option<String> = None;
+    let mut pane_id: Option<String> = None;
+
+    if !opts.no_tmux {
+        if !tmux::is_tmux_available() {
+            if verbose {
+                eprintln!("Warning: tmux not available, skipping window creation");
+            }
+        } else if !tmux::is_inside_tmux() {
+            if verbose {
+                eprintln!("Warning: not inside tmux, skipping window creation");
+            }
+        } else {
+            match create_tmux_window(task_id, &task_dir, opts, config, verbose) {
+                Ok((window, pane)) => {
+                    tmux_window = Some(window);
+                    pane_id = Some(pane);
+                }
+                Err(e) => {
+                    eprintln!("Warning: tmux window creation failed: {e}");
+                    // Continue without tmux — worktrees are still valid
+                }
+            }
+        }
+    }
+
     // Update state only after all worktrees succeeded
     let task_entry = TaskEntry {
         id: task_id.to_string(),
         path: task_dir.clone(),
         repos: task_repos,
         created_at: now,
+        tmux_window: tmux_window.clone(),
+        pane_id: pane_id.clone(),
     };
     state.tasks.insert(task_id.to_string(), task_entry);
     state.save()?;
+
+    // Auto-attach AFTER state save (select_window doesn't block like attach_session)
+    if let Some(ref target) = tmux_window
+        && config.auto_attach && !opts.no_attach
+    {
+        let _ = tmux::select_window(target, verbose);
+    }
 
     let data = serde_json::json!({
         "task_id": task_id,
         "path": task_dir,
         "repos": &resolved_repos,
         "branch": branch_name,
+        "tmux_window": tmux_window,
+        "pane_id": pane_id,
         "already_existed": false,
     });
     output::success(
@@ -232,4 +275,36 @@ pub fn run(
     );
 
     Ok(())
+}
+
+/// Create a tmux window for the task and optionally launch Claude.
+/// Returns (window_target, pane_id).
+fn create_tmux_window(
+    task_id: &str,
+    task_dir: &std::path::Path,
+    opts: &InitOptions,
+    config: &GroveConfig,
+    verbose: bool,
+) -> Result<(String, String), GroveError> {
+    let session = tmux::current_session(verbose)?;
+    let window_name = format!("{}-{}", config.tmux.session_prefix, task_id);
+    let window_target = format!("{session}:{window_name}");
+
+    // Create-or-get: attempt creation, handle "already exists" as success
+    if tmux::window_exists(&session, &window_name, verbose) {
+        if verbose {
+            eprintln!("tmux window '{window_name}' already exists, reusing");
+        }
+    } else {
+        tmux::new_window(&session, &window_name, task_dir, verbose)?;
+    }
+
+    let pane_id = tmux::get_pane_id(&window_target, verbose)?;
+
+    // Launch Claude if configured
+    if !opts.no_claude && config.auto_launch_claude {
+        claude::launch_in_pane(&window_target, &config.claude_command, verbose)?;
+    }
+
+    Ok((window_target, pane_id))
 }

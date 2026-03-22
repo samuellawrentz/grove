@@ -1,3 +1,4 @@
+mod claude;
 mod cli;
 mod commands;
 mod config;
@@ -5,6 +6,8 @@ mod error;
 mod git;
 mod output;
 mod state;
+mod tmux;
+mod tui;
 mod validation;
 
 use clap::Parser;
@@ -50,7 +53,9 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             branch,
             base,
             interactive,
-            ..
+            no_tmux,
+            no_claude,
+            no_attach,
         } => {
             let opts = commands::init::InitOptions {
                 repos: &repos,
@@ -58,6 +63,9 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                 branch: branch.as_deref(),
                 base: base.as_deref(),
                 interactive,
+                no_tmux,
+                no_claude,
+                no_attach,
             };
             commands::init::run(&task_id, &opts, &config, &mut state, json_mode, verbose)?;
         }
@@ -65,7 +73,44 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             commands::close::run(&task_id, force, &config, &mut state, json_mode, verbose)?;
         }
         Commands::List => {
-            commands::list::run(&state, json_mode)?;
+            commands::list::run(&state, &config, json_mode, verbose)?;
+        }
+        Commands::Attach { task_id } => {
+            commands::attach::run(&task_id, &state, json_mode, verbose)?;
+        }
+        Commands::Status { task_id } => {
+            commands::status::run(task_id.as_deref(), &state, json_mode, verbose)?;
+        }
+        Commands::Send { task_id, prompt } => {
+            commands::send::run(&task_id, &prompt, &state, json_mode, verbose)?;
+        }
+        Commands::Tui => {
+            if !tmux::is_tmux_available() {
+                return Err(GroveError::TmuxNotRunning("tmux is not installed".into()));
+            }
+            if !tmux::is_inside_tmux() {
+                return Err(GroveError::TmuxNotRunning(
+                    "grove tui must be run inside tmux".into(),
+                ));
+            }
+            tui::run(verbose)?;
+        }
+        Commands::Add {
+            task_id,
+            repo,
+            branch,
+            base,
+        } => {
+            commands::add::run(
+                &task_id,
+                &repo,
+                branch.as_deref(),
+                base.as_deref(),
+                &config,
+                &mut state,
+                json_mode,
+                verbose,
+            )?;
         }
     }
 
