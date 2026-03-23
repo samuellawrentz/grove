@@ -25,6 +25,8 @@ pub(crate) struct TreeState {
     pub cursor: usize,
     pub scroll_offset: usize,
     pub search_filter: Option<String>,
+    /// When Some(true), only show Claude panes; Some(false), only non-Claude; None, show all.
+    pub claude_filter: Option<bool>,
 }
 
 impl TreeState {
@@ -42,6 +44,7 @@ impl TreeState {
             cursor: 0,
             scroll_offset: 0,
             search_filter: None,
+            claude_filter: None,
         }
     }
 
@@ -138,12 +141,18 @@ impl TreeState {
         count
     }
 
-    /// Check if a pane matches the current search filter.
+    /// Check if a pane matches the current search and claude filters.
     pub fn pane_matches(&self, pane: &TreePane, group_name: &str) -> bool {
-        match &self.search_filter {
+        let search_ok = match &self.search_filter {
             Some(query) if !query.is_empty() => pane_matches_filter(pane, group_name, query),
             _ => true,
-        }
+        };
+        let claude_ok = match self.claude_filter {
+            Some(true) => pane.claude_state.is_some(),
+            Some(false) => pane.claude_state.is_none(),
+            None => true,
+        };
+        search_ok && claude_ok
     }
 
     /// Get positions of all visible pane rows (not group headers), respecting search filter.
@@ -297,14 +306,60 @@ fn pane_matches_filter(pane: &TreePane, group_name: &str, query: &str) -> bool {
         || fuzzy_match(query, &pane.pane_info.current_path.to_string_lossy())
 }
 
+/// Shorten a path fish-style: replace $HOME with ~, keep the last 2 components
+/// full, and collapse earlier components to their first character.
+/// e.g. `/home/user/src/personal/grove` → `~/s/personal/grove`
+fn shorten_path(path: &std::path::Path) -> String {
+    let path_str = path.to_string_lossy();
+    // Replace $HOME with ~
+    let home = dirs::home_dir().unwrap_or_default();
+    let (prefix, rest) = if let Ok(stripped) = path.strip_prefix(&home) {
+        ("~", stripped.to_path_buf())
+    } else {
+        ("", path.to_path_buf())
+    };
+
+    let components: Vec<&str> = rest
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+
+    if components.is_empty() {
+        return if prefix.is_empty() {
+            path_str.to_string()
+        } else {
+            prefix.to_string()
+        };
+    }
+
+    // Keep last 2 full, shorten the rest to first char
+    let keep_full = 2;
+    let mut parts: Vec<String> = Vec::new();
+    for (i, comp) in components.iter().enumerate() {
+        if i < components.len().saturating_sub(keep_full) {
+            parts.push(comp.chars().next().unwrap_or('.').to_string());
+        } else {
+            parts.push(comp.to_string());
+        }
+    }
+    if !prefix.is_empty() {
+        format!("{prefix}/{}", parts.join("/"))
+    } else {
+        parts.join("/")
+    }
+}
+
 fn build_groups(
     panes: &[PaneInfo],
     claude_states: &HashMap<String, ClaudeState>,
     exclude_pane_id: &str,
     old_expanded: &[(String, bool)],
 ) -> Vec<TreeGroup> {
-    // Group panes by directory basename
-    let mut group_map: HashMap<String, (PathBuf, Vec<TreePane>)> = HashMap::new();
+    // Group panes by parent directory
+    let mut group_map: HashMap<PathBuf, Vec<TreePane>> = HashMap::new();
 
     for pane in panes {
         if pane.pane_id == exclude_pane_id || pane.current_command == "grove" {
@@ -316,13 +371,6 @@ fn build_groups(
         if !pane.current_path.exists() {
             continue;
         }
-
-        let basename = pane
-            .current_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("(root)")
-            .to_string();
 
         // Claude detection: state file primary, command name fallback
         let claude_state = if let Some(state) = claude_states.get(&pane.pane_id) {
@@ -347,16 +395,22 @@ fn build_groups(
             claude_state,
         };
 
+        let parent = pane
+            .current_path
+            .parent()
+            .unwrap_or(&pane.current_path)
+            .to_path_buf();
+
         group_map
-            .entry(basename)
-            .or_insert_with(|| (pane.current_path.clone(), Vec::new()))
-            .1
+            .entry(parent)
+            .or_default()
             .push(tree_pane);
     }
 
     let mut groups: Vec<TreeGroup> = group_map
         .into_iter()
-        .map(|(name, (path, mut panes))| {
+        .map(|(path, mut panes)| {
+            let name = shorten_path(&path);
             // Sort panes by activity descending (most recent first), then session:window as tiebreaker
             panes.sort_by(|a, b| {
                 b.pane_info
@@ -407,11 +461,22 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_pane(id: &str, session: &str, win_idx: u32, path: &str, cmd: &str) -> PaneInfo {
+        make_pane_win(id, session, win_idx, &format!("win-{win_idx}"), path, cmd)
+    }
+
+    fn make_pane_win(
+        id: &str,
+        session: &str,
+        win_idx: u32,
+        win_name: &str,
+        path: &str,
+        cmd: &str,
+    ) -> PaneInfo {
         PaneInfo {
             pane_id: id.to_string(),
             session_name: session.to_string(),
             window_index: win_idx,
-            window_name: format!("win-{win_idx}"),
+            window_name: win_name.to_string(),
             current_path: PathBuf::from(path),
             current_command: cmd.to_string(),
             pid: 1000,
@@ -420,32 +485,57 @@ mod tests {
     }
 
     #[test]
-    fn test_build_groups_by_directory() {
+    fn test_groups_by_parent_directory() {
+        // Panes in /opt/src/grove and /opt/src/other share parent /opt/src
         let panes = vec![
-            make_pane("%1", "main", 0, "/home/user/src/grove", "zsh"),
-            make_pane("%2", "main", 1, "/home/user/src/grove", "claude"),
-            make_pane("%3", "work", 0, "/home/user/src/other", "vim"),
-            make_pane("%4", "work", 1, "/home/user/src/other", "zsh"),
-            make_pane("%5", "dev", 0, "/home/user/src/third", "zsh"),
+            make_pane("%1", "main", 0, "/opt/src/grove", "zsh"),
+            make_pane("%2", "main", 1, "/opt/src/grove", "claude"),
+            make_pane("%3", "work", 0, "/opt/src/other", "vim"),
+            make_pane("%5", "dev", 0, "/tmp/third", "zsh"),
         ];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        assert_eq!(tree.groups.len(), 3);
-        // Alphabetical: grove, other, third
-        assert_eq!(tree.groups[0].name, "grove");
+        // /opt/src siblings → 1 group, /tmp/third → another
+        assert_eq!(tree.groups.len(), 2);
+        let names: Vec<&str> = tree.groups.iter().map(|g| g.name.as_str()).collect();
+        assert!(names.contains(&"opt/src"));
+        assert!(names.contains(&"tmp"));
+    }
+
+    #[test]
+    fn test_sibling_dirs_grouped() {
+        // Two panes in different subdirs of the same parent
+        let panes = vec![
+            make_pane("%1", "main", 0, "/home/user/tasks/task-a/console", "zsh"),
+            make_pane("%2", "work", 0, "/home/user/tasks/task-a/api", "zsh"),
+        ];
+        let states = HashMap::new();
+        let tree = TreeState::build(&panes, &states, "");
+
+        // Both share parent /home/user/tasks/task-a → 1 group
+        assert_eq!(tree.groups.len(), 1);
         assert_eq!(tree.groups[0].panes.len(), 2);
-        assert_eq!(tree.groups[1].name, "other");
-        assert_eq!(tree.groups[1].panes.len(), 2);
-        assert_eq!(tree.groups[2].name, "third");
-        assert_eq!(tree.groups[2].panes.len(), 1);
+    }
+
+    #[test]
+    fn test_shorten_path_fish_style() {
+        assert_eq!(
+            shorten_path(std::path::Path::new("/opt/src/grove")),
+            "o/src/grove"
+        );
+        assert_eq!(
+            shorten_path(std::path::Path::new("/a/b/c/d/e")),
+            "a/b/c/d/e"
+        );
+        assert_eq!(shorten_path(std::path::Path::new("/tmp")), "tmp");
     }
 
     #[test]
     fn test_excludes_own_pane() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/home/user/src/grove", "zsh"),
-            make_pane("%2", "main", 1, "/home/user/src/grove", "zsh"),
+            make_pane("%1", "main", 0, "/opt/src/grove", "zsh"),
+            make_pane("%2", "main", 1, "/opt/src/grove", "zsh"),
         ];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "%1");
@@ -457,13 +547,12 @@ mod tests {
 
     #[test]
     fn test_root_path_group_name() {
-        let panes = vec![make_pane("%1", "main", 0, "/", "zsh")];
+        let panes = vec![make_pane("%1", "main", 0, "/tmp", "zsh")];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        // Root path should be grouped under "(root)" since file_name() returns None for "/"
-        // Actually PathBuf::from("/").file_name() returns None, so it should be "(root)"
-        assert_eq!(tree.groups[0].name, "(root)");
+        // Parent of /tmp is / → shorten_path("/") returns "/"
+        assert_eq!(tree.groups[0].name, "/");
     }
 
     #[test]
@@ -503,14 +592,14 @@ mod tests {
     #[test]
     fn test_cursor_navigation() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/home/user/src/a", "zsh"),
-            make_pane("%2", "main", 1, "/home/user/src/a", "zsh"),
-            make_pane("%3", "work", 0, "/home/user/src/b", "zsh"),
+            make_pane("%1", "main", 0, "/opt/a/x", "zsh"),
+            make_pane("%2", "main", 1, "/opt/a/y", "zsh"),
+            make_pane("%3", "work", 0, "/opt/b/z", "zsh"),
         ];
         let states = HashMap::new();
         let mut tree = TreeState::build(&panes, &states, "");
 
-        // All expanded: a(header), %1, %2, b(header), %3
+        // Groups: /opt/a (2 panes), /opt/b (1 pane) → headers + panes = 5
         assert_eq!(tree.visible_count(), 5);
         assert_eq!(tree.cursor, 0);
 
@@ -535,9 +624,9 @@ mod tests {
     #[test]
     fn test_collapsed_group_hides_children() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/home/user/src/a", "zsh"),
-            make_pane("%2", "main", 1, "/home/user/src/a", "zsh"),
-            make_pane("%3", "work", 0, "/home/user/src/b", "zsh"),
+            make_pane("%1", "main", 0, "/opt/a/x", "zsh"),
+            make_pane("%2", "main", 1, "/opt/a/y", "zsh"),
+            make_pane("%3", "work", 0, "/opt/b/z", "zsh"),
         ];
         let states = HashMap::new();
         let mut tree = TreeState::build(&panes, &states, "");
@@ -561,8 +650,8 @@ mod tests {
     #[test]
     fn test_rebuild_preserves_expanded_state() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/home/user/src/a", "zsh"),
-            make_pane("%2", "work", 0, "/home/user/src/b", "zsh"),
+            make_pane("%1", "main", 0, "/opt/a/x", "zsh"),
+            make_pane("%2", "work", 0, "/opt/b/y", "zsh"),
         ];
         let states = HashMap::new();
         let mut tree = TreeState::build(&panes, &states, "");
@@ -594,16 +683,16 @@ mod tests {
     #[test]
     fn test_panes_sorted_within_group() {
         let panes = vec![
-            make_pane("%3", "work", 2, "/home/user/src/a", "zsh"),
-            make_pane("%1", "main", 0, "/home/user/src/a", "zsh"),
-            make_pane("%2", "main", 1, "/home/user/src/a", "zsh"),
+            make_pane("%3", "work", 2, "/opt/src/c", "zsh"),
+            make_pane("%1", "main", 0, "/opt/src/a", "zsh"),
+            make_pane("%2", "main", 1, "/opt/src/b", "zsh"),
         ];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
         let group = &tree.groups[0];
-        assert_eq!(group.panes[0].pane_info.pane_id, "%1"); // main:0
-        assert_eq!(group.panes[1].pane_info.pane_id, "%2"); // main:1
-        assert_eq!(group.panes[2].pane_info.pane_id, "%3"); // work:2
+        assert_eq!(group.panes[0].pane_info.pane_id, "%1"); // main
+        assert_eq!(group.panes[1].pane_info.pane_id, "%2"); // main
+        assert_eq!(group.panes[2].pane_info.pane_id, "%3"); // work
     }
 }

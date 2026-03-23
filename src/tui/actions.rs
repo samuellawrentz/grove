@@ -3,7 +3,7 @@ use crossterm::event::KeyEvent;
 use crate::claude::ClaudeState;
 use crate::{recents, tmux};
 
-use super::app::{App, FzfAction, SidebarFocus};
+use super::app::{App, SidebarFocus};
 
 /// Handle a key event in the TUI.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
@@ -93,6 +93,30 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Open prompt mode: user picked a directory, now choosing what to launch
+    if let Some(dir) = app.open_prompt_dir.take() {
+        match key.code {
+            KeyCode::Char('c') => {
+                let cmd = app.claude_command.clone();
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
+            KeyCode::Char('t') => {
+                launch_in_new_window(app, &dir, None);
+            }
+            KeyCode::Char('e') => {
+                launch_in_new_window(app, &dir, Some("nvim ."));
+            }
+            KeyCode::Esc => {
+                // cancelled
+            }
+            _ => {
+                // unrecognized key, put dir back
+                app.open_prompt_dir = Some(dir);
+            }
+        }
+        return;
+    }
+
     // Global keys (work in both panes)
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
@@ -115,16 +139,23 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.preview_scroll_up = app.preview_scroll_up.saturating_add(3);
             return;
         }
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.tree.claude_filter = match app.tree.claude_filter {
+                Some(true) => Some(false),
+                Some(false) => None,
+                None => Some(true),
+            };
+            app.tree.jump_first_pane();
+            update_scroll(app);
+            app.refresh_preview();
+            return;
+        }
         KeyCode::Char('/') => {
             app.search_input = Some(String::new());
             return;
         }
-        KeyCode::Char('N') => {
-            app.pending_fzf = Some(FzfAction::Claude);
-            return;
-        }
-        KeyCode::Char('t') => {
-            app.pending_fzf = Some(FzfAction::Terminal);
+        KeyCode::Char('o') => {
+            app.pending_fzf = true;
             return;
         }
         _ => {}
@@ -261,6 +292,13 @@ fn handle_recents_key(app: &mut App, key: KeyEvent) {
                 .to_string();
             let cmd = app.claude_command.clone();
             launch_in_new_window(app, &dir, Some(&cmd));
+        }
+        KeyCode::Char('t') => {
+            let dir = app.recents[app.recents_cursor]
+                .path
+                .to_string_lossy()
+                .to_string();
+            launch_in_new_window(app, &dir, None);
         }
         KeyCode::Char('x') => {
             recents::remove(app.recents_cursor);

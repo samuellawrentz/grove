@@ -35,10 +35,15 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         Color::DarkGray
     };
+    let pane_title = match app.tree.claude_filter {
+        Some(true) => " Panes [claude] ",
+        Some(false) => " Panes [other] ",
+        None => " Panes [all] ",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(" Panes ");
+        .title(pane_title);
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -86,12 +91,13 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     None => "·",
                 };
 
-                let label = format!(
-                    "  {icon} {}:{} [{}]",
-                    pane.pane_info.session_name,
-                    pane.pane_info.window_index,
-                    pane.pane_info.current_command,
-                );
+                let basename = pane
+                    .pane_info
+                    .current_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(".");
+                let label = format!("  {icon} {} [{}]", basename, pane.pane_info.current_command,);
 
                 let matches = app.tree.pane_matches(pane, &group.name);
                 let style = if focused && row_idx == app.tree.cursor {
@@ -154,14 +160,29 @@ fn draw_recents(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| entry.path.to_string_lossy().to_string());
+            let parent = entry
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string());
             let time = recents::format_relative_time(entry.timestamp);
-            let label = format!("  {name}  {time}");
-            let style = if focused && i == app.recents_cursor {
+            let selected = focused && i == app.recents_cursor;
+            let style = if selected {
                 Style::default().bg(Color::DarkGray)
             } else {
                 Style::default()
             };
-            Line::from(Span::styled(label, style))
+            let dim = if selected {
+                Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let mut spans = vec![Span::styled(format!("  {name}"), style)];
+            if let Some(parent) = parent {
+                spans.push(Span::styled(format!("  {parent}/"), dim));
+            }
+            spans.push(Span::styled(format!("  {time}"), dim));
+            Line::from(spans)
         })
         .collect();
 
@@ -185,10 +206,15 @@ fn draw_recents(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let border_style = Style::default().fg(Color::DarkGray);
 
+    let filter_label = match app.tree.claude_filter {
+        Some(true) => " [claude] ",
+        Some(false) => " [other] ",
+        None => " [all] ",
+    };
     let title = if let Some(pane_id) = app.tree.selected_pane_id() {
-        format!(" Preview -- {pane_id} ")
+        format!(" Preview{filter_label}-- {pane_id} ")
     } else {
-        " Preview ".to_string()
+        format!(" Preview{filter_label}")
     };
 
     let block = Block::default()
@@ -215,7 +241,18 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let content = if let Some(ref query) = app.search_input {
+    let content = if app.open_prompt_dir.is_some() {
+        Line::from(vec![
+            Span::styled("Open: ", Style::default().fg(Color::Cyan)),
+            Span::styled("[c]", Style::default().fg(Color::White)),
+            Span::styled("laude  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[t]", Style::default().fg(Color::White)),
+            Span::styled("erminal  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[e]", Style::default().fg(Color::White)),
+            Span::styled("ditor  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc:cancel", Style::default().fg(Color::DarkGray)),
+        ])
+    } else if let Some(ref query) = app.search_input {
         Line::from(vec![
             Span::styled("/ ", Style::default().fg(Color::Cyan)),
             Span::raw(query.as_str()),
@@ -235,10 +272,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         let hint = match app.sidebar_focus {
             SidebarFocus::Tree => {
-                "j/k:nav  C-h/C-l:pane  H/L:fold  /:search  Enter:switch  e:edit  C:claude  T:terminal  a/r:accept/reject  s:send  n:new  N:open  t:term  x:close  q:quit"
+                "j/k:nav  C-h/C-l:pane  C-t:filter  H/L:fold  /:search  Enter:switch  e:edit  C:claude  T:terminal  a/r:accept/reject  s:send  o:open  n:new  x:close  q:quit"
             }
             SidebarFocus::Recents => {
-                "j/k:nav  C-h/C-l:pane  c/Enter:continue  n:new session  t:term  N:open  x:remove  q:quit"
+                "j/k:nav  C-h/C-l:pane  C-t:filter  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"
             }
         };
         Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))

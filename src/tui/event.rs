@@ -103,20 +103,12 @@ pub(crate) fn run_event_loop(
             app.refresh_preview();
         }
 
-        // Handle fzf directory picker
-        if let Some(action) = app.pending_fzf.take() {
-            use super::app::FzfAction;
-
-            let cmd = match action {
-                FzfAction::Claude => Some(app.claude_command.clone()),
-                FzfAction::Terminal => None,
-            };
-            let verbose = app.verbose;
-
+        // Handle fzf directory picker → sets open_prompt_dir for sub-choice
+        if std::mem::take(&mut app.pending_fzf) {
             let result = suspend_tui(terminal, || {
                 std::process::Command::new("sh")
                     .arg("-c")
-                    .arg("zoxide query -l | fzf --prompt='Directory> '")
+                    .arg("{ grove list --json 2>/dev/null | jq -r '.tasks[].path // empty' 2>/dev/null; zoxide query -l 2>/dev/null; } | awk '!seen[$0]++' | fzf --prompt='Directory> '")
                     .stdin(std::process::Stdio::inherit())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::inherit())
@@ -128,15 +120,7 @@ pub(crate) fn run_event_loop(
             {
                 let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !dir.is_empty() {
-                    match crate::tmux::new_window(&dir, cmd.as_deref(), verbose) {
-                        Ok(pane_id) => {
-                            let _ = crate::tmux::switch_to_pane(&pane_id, verbose);
-                            app.should_quit = true;
-                        }
-                        Err(e) => {
-                            app.status_message = Some(format!("new window failed: {e}"));
-                        }
-                    }
+                    app.open_prompt_dir = Some(dir);
                 }
             }
 

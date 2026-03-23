@@ -16,12 +16,6 @@ pub(crate) enum SidebarFocus {
     Recents,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum FzfAction {
-    Claude,
-    Terminal,
-}
-
 /// Main application state for the TUI.
 pub(crate) struct App {
     pub tree: TreeState,
@@ -35,7 +29,9 @@ pub(crate) struct App {
     #[allow(dead_code)]
     pub my_pane_id: String,
     pub pending_popup: Option<String>,
-    pub pending_fzf: Option<FzfAction>,
+    pub pending_fzf: bool,
+    /// Directory picked by fzf, awaiting open-prompt sub-choice.
+    pub open_prompt_dir: Option<String>,
     pub preview_scroll_up: u16,
     pub claude_command: String,
     pub sidebar_focus: SidebarFocus,
@@ -63,6 +59,7 @@ impl App {
                 cursor: 0,
                 scroll_offset: 0,
                 search_filter: None,
+                claude_filter: Some(true),
             },
             search_input: None,
             preview_content: String::new(),
@@ -73,7 +70,8 @@ impl App {
             status_message: None,
             my_pane_id,
             pending_popup: None,
-            pending_fzf: None,
+            pending_fzf: false,
+            open_prompt_dir: None,
             preview_scroll_up: 0,
             claude_command,
             sidebar_focus: SidebarFocus::Tree,
