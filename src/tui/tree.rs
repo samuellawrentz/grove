@@ -142,15 +142,21 @@ impl TreeState {
     }
 
     /// Check if a pane matches the current search and claude filters.
+    /// When search is active, the claude filter is ignored so all panes are searchable.
     pub fn pane_matches(&self, pane: &TreePane, group_name: &str) -> bool {
+        let searching = matches!(&self.search_filter, Some(q) if !q.is_empty());
         let search_ok = match &self.search_filter {
             Some(query) if !query.is_empty() => pane_matches_filter(pane, group_name, query),
             _ => true,
         };
-        let claude_ok = match self.claude_filter {
-            Some(true) => pane.claude_state.is_some(),
-            Some(false) => pane.claude_state.is_none(),
-            None => true,
+        let claude_ok = if searching {
+            true
+        } else {
+            match self.claude_filter {
+                Some(true) => pane.claude_state.is_some(),
+                Some(false) => pane.claude_state.is_none(),
+                None => true,
+            }
         };
         search_ok && claude_ok
     }
@@ -401,10 +407,7 @@ fn build_groups(
             .unwrap_or(&pane.current_path)
             .to_path_buf();
 
-        group_map
-            .entry(parent)
-            .or_default()
-            .push(tree_pane);
+        group_map.entry(parent).or_default().push(tree_pane);
     }
 
     let mut groups: Vec<TreeGroup> = group_map
