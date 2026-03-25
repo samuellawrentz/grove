@@ -50,12 +50,16 @@ pub fn run(
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
-    let repos_to_sync: Vec<(String, std::path::PathBuf)> = if let Some(name) = repo_name {
+    let repos_to_sync: Vec<(String, std::path::PathBuf, String)> = if let Some(name) = repo_name {
         let entry = state
             .repos
             .get(name)
             .ok_or_else(|| GroveError::RepoNotRegistered(format!("'{name}' is not registered")))?;
-        vec![(entry.name.clone(), entry.path.clone())]
+        vec![(
+            entry.name.clone(),
+            entry.path.clone(),
+            entry.default_branch.clone(),
+        )]
     } else {
         if state.repos.is_empty() {
             let data = serde_json::json!({ "results": [] });
@@ -65,7 +69,7 @@ pub fn run(
         let mut repos: Vec<_> = state
             .repos
             .values()
-            .map(|r| (r.name.clone(), r.path.clone()))
+            .map(|r| (r.name.clone(), r.path.clone(), r.default_branch.clone()))
             .collect();
         repos.sort_by(|a, b| a.0.cmp(&b.0));
         repos
@@ -77,17 +81,19 @@ pub fn run(
     let semaphore = Arc::new(Semaphore::new(max_parallel));
 
     std::thread::scope(|s| {
-        for (name, path) in &repos_to_sync {
+        for (name, path, default_branch) in &repos_to_sync {
             let results = Arc::clone(&results);
             let sem = Arc::clone(&semaphore);
             let name = name.clone();
             let path = path.clone();
+            let default_branch = default_branch.clone();
             s.spawn(move || {
                 sem.acquire();
                 if !json_mode {
                     eprintln!("Syncing {}...", name);
                 }
-                let result = git::fetch_repo(&path, prune, verbose);
+                let result = git::fetch_repo(&path, prune, verbose)
+                    .and_then(|()| git::update_default_branch(&path, &default_branch, verbose));
                 let sync_result = match result {
                     Ok(()) => SyncResult {
                         repo: name.clone(),

@@ -1,20 +1,37 @@
+use dialoguer::Select;
+
 use crate::config::GroveConfig;
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
 use crate::state::GroveState;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
-    task_id: &str,
+    task_id: Option<&str>,
     force: bool,
+    delete_branches: bool,
+    interactive: bool,
     _config: &GroveConfig,
     state: &mut GroveState,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
+    // Resolve task_id: interactive prompt or required CLI arg
+    let resolved_id = match task_id {
+        Some(id) => id.to_string(),
+        None if interactive => interactive_select_task(state)?,
+        None => {
+            return Err(GroveError::General(
+                "task_id is required (use -i for interactive mode)".to_string(),
+            ));
+        }
+    };
+    let task_id = &resolved_id;
+
     let task = state
         .tasks
-        .get(task_id)
+        .get(task_id.as_str())
         .ok_or_else(|| GroveError::TaskNotFound(task_id.to_string()))?
         .clone();
 
@@ -109,13 +126,40 @@ pub fn run(
         }
     }
 
+    // Delete branches and prune worktree refs
+    if delete_branches {
+        for task_repo in &task.repos {
+            let bare_path = state
+                .repos
+                .get(&task_repo.repo_name)
+                .map(|r| r.path.clone());
+
+            if let Some(bp) = bare_path
+                && bp.exists()
+            {
+                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, verbose) {
+                    warnings.push(format!(
+                        "failed to delete branch '{}' from '{}': {e}",
+                        task_repo.branch, task_repo.repo_name
+                    ));
+                }
+                if let Err(e) = git::prune_worktrees(&bp, verbose) {
+                    warnings.push(format!(
+                        "failed to prune worktrees for '{}': {e}",
+                        task_repo.repo_name
+                    ));
+                }
+            }
+        }
+    }
+
     // Remove task directory
     if task.path.exists() {
         std::fs::remove_dir_all(&task.path)?;
     }
 
     // Update state
-    state.tasks.remove(task_id);
+    state.tasks.remove(task_id.as_str());
     state.save()?;
 
     let data = serde_json::json!({
@@ -126,4 +170,32 @@ pub fn run(
     output::success(json_mode, &format!("Closed task '{task_id}'"), data);
 
     Ok(())
+}
+
+/// Interactive mode: prompt user to select a task from active tasks.
+fn interactive_select_task(state: &GroveState) -> Result<String, GroveError> {
+    if state.tasks.is_empty() {
+        return Err(GroveError::General("no active tasks to close".to_string()));
+    }
+
+    let mut task_ids: Vec<&str> = state.tasks.keys().map(|s| s.as_str()).collect();
+    task_ids.sort();
+
+    let display_items: Vec<String> = task_ids
+        .iter()
+        .map(|id| {
+            let task = &state.tasks[*id];
+            let repos: Vec<&str> = task.repos.iter().map(|r| r.repo_name.as_str()).collect();
+            let stale = if task.is_stale() { " [stale]" } else { "" };
+            format!("{id} ({repos}){stale}", repos = repos.join(", "))
+        })
+        .collect();
+
+    let selection = Select::new()
+        .with_prompt("Select task to close")
+        .items(&display_items)
+        .interact()
+        .map_err(|e| GroveError::General(format!("interactive selection failed: {e}")))?;
+
+    Ok(task_ids[selection].to_string())
 }

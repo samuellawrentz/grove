@@ -74,6 +74,35 @@ pub fn fetch_repo(bare_path: &Path, prune: bool, verbose: bool) -> Result<(), Gr
     Ok(())
 }
 
+/// Fast-forward a local branch to match its remote tracking branch.
+/// Runs `git update-ref refs/heads/<branch> refs/remotes/origin/<branch>`.
+/// Silently skips if the remote ref doesn't exist.
+pub fn update_default_branch(
+    bare_path: &Path,
+    branch: &str,
+    verbose: bool,
+) -> Result<(), GroveError> {
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let local_ref = format!("refs/heads/{branch}");
+
+    // Check remote ref exists before updating
+    match run_git(
+        &["rev-parse", "--verify", &remote_ref],
+        Some(bare_path),
+        verbose,
+    ) {
+        Ok(_) => {
+            run_git(
+                &["update-ref", &local_ref, &remote_ref],
+                Some(bare_path),
+                verbose,
+            )?;
+            Ok(())
+        }
+        Err(_) => Ok(()), // remote ref doesn't exist, skip
+    }
+}
+
 /// Create a worktree from a bare repo.
 /// Runs `git worktree add -b <branch> <worktree_path> <base_branch>`.
 pub fn create_worktree(
@@ -107,6 +136,20 @@ pub fn remove_worktree(
         .ok_or_else(|| GroveError::General("invalid worktree path".to_string()))?;
 
     run_git(&["worktree", "remove", wt_str], Some(bare_path), verbose)?;
+    Ok(())
+}
+
+/// Delete a branch from a bare repo.
+/// Runs `git branch -D <branch>`.
+pub fn delete_branch(bare_path: &Path, branch: &str, verbose: bool) -> Result<(), GroveError> {
+    run_git(&["branch", "-D", branch], Some(bare_path), verbose)?;
+    Ok(())
+}
+
+/// Prune stale worktree references.
+/// Runs `git worktree prune`.
+pub fn prune_worktrees(bare_path: &Path, verbose: bool) -> Result<(), GroveError> {
+    run_git(&["worktree", "prune"], Some(bare_path), verbose)?;
     Ok(())
 }
 
