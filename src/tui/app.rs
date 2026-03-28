@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::agent::AgentFilter;
 use crate::config::GroveConfig;
 use crate::error::GroveError;
 use crate::recents::{self, RecentEntry};
@@ -33,7 +34,7 @@ pub(crate) struct App {
     /// Directory picked by fzf, awaiting open-prompt sub-choice.
     pub open_prompt_dir: Option<String>,
     pub preview_scroll_up: u16,
-    pub claude_command: String,
+    pub default_agent_command: String,
     pub sidebar_focus: SidebarFocus,
     pub recents: Vec<RecentEntry>,
     pub recents_cursor: usize,
@@ -49,7 +50,7 @@ impl App {
             my_pane_id
         };
 
-        let claude_command = GroveConfig::load(None, None, None, None)
+        let default_agent_command = GroveConfig::load(None, None, None, None)
             .map(|(c, _)| c.claude_command)
             .unwrap_or_else(|_| "claude".to_string());
 
@@ -59,7 +60,7 @@ impl App {
                 cursor: 0,
                 scroll_offset: 0,
                 search_filter: None,
-                claude_filter: Some(true),
+                agent_filter: AgentFilter::AnyAgent,
             },
             search_input: None,
             preview_content: String::new(),
@@ -73,7 +74,7 @@ impl App {
             pending_fzf: false,
             open_prompt_dir: None,
             preview_scroll_up: 0,
-            claude_command,
+            default_agent_command,
             sidebar_focus: SidebarFocus::Tree,
             recents: recents::load(),
             recents_cursor: 0,
@@ -89,7 +90,7 @@ impl App {
     pub fn refresh_tree(&mut self) {
         match (
             source::fetch_panes(self.verbose),
-            source::fetch_claude_states(),
+            source::fetch_agent_states(),
         ) {
             (Ok(panes), Ok(states)) => {
                 self.tree.rebuild(&panes, &states, "");

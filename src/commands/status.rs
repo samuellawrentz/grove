@@ -1,4 +1,4 @@
-use crate::claude;
+use crate::agent;
 use crate::error::GroveError;
 use crate::output;
 use crate::state::GroveState;
@@ -16,7 +16,7 @@ pub fn run(
         return Err(GroveError::TaskNotFound(id.to_string()));
     }
 
-    let claude_states = claude::read_state_file().unwrap_or_default();
+    let agent_states = agent::read_state_file().unwrap_or_default();
 
     let mut tasks: Vec<_> = state.tasks.values().collect();
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
@@ -30,8 +30,8 @@ pub fn run(
         let task_list: Vec<serde_json::Value> = tasks
             .iter()
             .map(|t| {
-                let (tmux_alive, live_claude_state) =
-                    claude::resolve_task_state(t, &claude_states, verbose);
+                let (tmux_alive, live_agent_state) =
+                    agent::resolve_task_state(t, &agent_states, verbose);
                 let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
 
                 serde_json::json!({
@@ -42,7 +42,8 @@ pub fn run(
                     "tmux_window": t.tmux_window,
                     "pane_id": t.pane_id,
                     "tmux_alive": tmux_alive,
-                    "claude_state": live_claude_state.to_string(),
+                    "claude_state": live_agent_state.to_string(),
+                    "agent_state": live_agent_state.to_string(),
                     "created_at": t.created_at,
                 })
             })
@@ -56,8 +57,8 @@ pub fn run(
         }
 
         for t in &tasks {
-            let (tmux_alive, live_claude_state) =
-                claude::resolve_task_state(t, &claude_states, verbose);
+            let (tmux_alive, live_agent_state) =
+                agent::resolve_task_state(t, &agent_states, verbose);
             let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
             let branch = t.repos.first().map(|r| r.branch.as_str()).unwrap_or("");
 
@@ -70,8 +71,8 @@ pub fn run(
             let pane_str = t.pane_id.as_deref().unwrap_or("-");
 
             println!(
-                "Task: {}  Window: {}  Pane: {}  Claude: {}",
-                t.id, tmux_status, pane_str, live_claude_state
+                "Task: {}  Window: {}  Pane: {}  Agent: {}",
+                t.id, tmux_status, pane_str, live_agent_state
             );
             println!("  Repos: {}  Branch: {}", repo_names.join(", "), branch);
             println!("  Path: {}", t.path.display());

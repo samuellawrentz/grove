@@ -1,7 +1,7 @@
 use chrono::Utc;
 use dialoguer::{Input, MultiSelect};
 
-use crate::claude;
+use crate::agent;
 use crate::config::GroveConfig;
 use crate::error::GroveError;
 use crate::git;
@@ -19,6 +19,7 @@ pub struct InitOptions<'a> {
     pub no_tmux: bool,
     pub no_claude: bool,
     pub no_attach: bool,
+    pub agent: Option<&'a str>,
 }
 
 /// Interactive mode: prompt user to select repos and branch name.
@@ -302,9 +303,11 @@ fn create_tmux_window(
 
     let pane_id = tmux::get_pane_id(&window_target, verbose)?;
 
-    // Launch Claude if configured
+    // Launch agent if configured
     if !opts.no_claude && config.auto_launch_claude {
-        claude::launch_in_pane(&window_target, &config.claude_command, verbose)?;
+        let agent_name = opts.agent.unwrap_or("claude");
+        let cmd = config.resolved_agent_command(agent_name);
+        agent::launch_in_pane(&window_target, &cmd, verbose)?;
     }
 
     Ok((window_target, pane_id))

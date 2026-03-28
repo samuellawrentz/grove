@@ -691,6 +691,7 @@ dependencies = [
  "dirs",
  "predicates",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "signal-hook",

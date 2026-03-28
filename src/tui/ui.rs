@@ -2,16 +2,15 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use super::app::{App, SidebarFocus};
-use crate::claude::ClaudeState;
+use crate::agent::{AGENT_REGISTRY, AgentFilter, AgentState};
 use crate::recents;
 
 /// Draw the TUI frame.
 pub(crate) fn draw(f: &mut Frame, app: &App) {
-    let has_input = app.prompt_input.is_some() || app.search_input.is_some();
-    let bar_height = if has_input { 3 } else { 1 };
+    let bar_height = 1;
     let outer =
         Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).split(f.area());
 
@@ -26,6 +25,11 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     draw_recents(f, app, sidebar[1]);
     draw_preview(f, app, panels[1]);
     draw_status_bar(f, app, outer[1]);
+
+    // Draw prompt modal overlay on top of everything
+    if let Some(ref input) = app.prompt_input {
+        draw_prompt_modal(f, input);
+    }
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -35,15 +39,23 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         Color::DarkGray
     };
-    let pane_title = match app.tree.claude_filter {
-        Some(true) => " Panes [claude] ",
-        Some(false) => " Panes [other] ",
-        None => " Panes [all] ",
+    let pane_title = match &app.tree.agent_filter {
+        AgentFilter::All => " Panes [all] ".to_string(),
+        AgentFilter::AnyAgent => " Panes [agents] ".to_string(),
+        AgentFilter::Specific(kind) => {
+            let name = AGENT_REGISTRY
+                .iter()
+                .find(|d| d.kind == *kind)
+                .map(|d| d.display_name)
+                .unwrap_or("?");
+            format!(" Panes [{name}] ")
+        }
+        AgentFilter::NonAgent => " Panes [other] ".to_string(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(pane_title);
+        .title(pane_title.as_str());
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -84,10 +96,16 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
         if group.expanded {
             for pane in &group.panes {
-                let icon = match &pane.claude_state {
-                    Some(ClaudeState::Waiting) => "◉",
-                    Some(ClaudeState::Active) => "●",
-                    Some(ClaudeState::NotRunning) => "○",
+                let icon = match &pane.agent {
+                    Some(info) => {
+                        let def = AGENT_REGISTRY.iter().find(|d| d.kind == info.kind);
+                        match (&info.state, def) {
+                            (AgentState::Active, Some(d)) => d.icon_active,
+                            (AgentState::Waiting, Some(d)) => d.icon_waiting,
+                            (AgentState::NotRunning, Some(d)) => d.icon_not_running,
+                            _ => "○",
+                        }
+                    }
                     None => "·",
                 };
 
@@ -206,15 +224,23 @@ fn draw_recents(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let border_style = Style::default().fg(Color::DarkGray);
 
-    let filter_label = match app.tree.claude_filter {
-        Some(true) => " [claude] ",
-        Some(false) => " [other] ",
-        None => " [all] ",
+    let filter_label = match &app.tree.agent_filter {
+        AgentFilter::All => " [all] ".to_string(),
+        AgentFilter::AnyAgent => " [agents] ".to_string(),
+        AgentFilter::Specific(kind) => {
+            let name = AGENT_REGISTRY
+                .iter()
+                .find(|d| d.kind == *kind)
+                .map(|d| d.display_name)
+                .unwrap_or("?");
+            format!(" [{name}] ")
+        }
+        AgentFilter::NonAgent => " [other] ".to_string(),
     };
     let title = if let Some(pane_id) = app.tree.selected_pane_id() {
-        format!(" Preview{filter_label}-- {pane_id} ")
+        format!(" Preview{}-- {pane_id} ", filter_label)
     } else {
-        format!(" Preview{filter_label}")
+        format!(" Preview{}", filter_label)
     };
 
     let block = Block::default()
@@ -240,12 +266,50 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(preview, area);
 }
 
+fn draw_prompt_modal(f: &mut Frame, input: &str) {
+    let area = f.area();
+    let width = (area.width / 2).max(40).min(area.width.saturating_sub(4));
+    // 2 for borders + content lines (at least 1)
+    let inner_width = width.saturating_sub(2) as usize;
+    let content_lines = if inner_width == 0 {
+        1
+    } else {
+        ((input.len() + 1) / inner_width.max(1) + 1) as u16 // +1 for cursor
+    };
+    let height = (content_lines + 2).min(area.height.saturating_sub(2)); // +2 for borders
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = ratatui::layout::Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Send ");
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let text = format!("{input}_");
+    let paragraph = Paragraph::new(text)
+        .style(Style::default())
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(paragraph, inner);
+}
+
 fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let content = if app.open_prompt_dir.is_some() {
         Line::from(vec![
             Span::styled("Open: ", Style::default().fg(Color::Cyan)),
             Span::styled("[c]", Style::default().fg(Color::White)),
             Span::styled("laude  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[o]", Style::default().fg(Color::White)),
+            Span::styled("pencode  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("code[x]", Style::default().fg(Color::White)),
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("c[u]", Style::default().fg(Color::White)),
+            Span::styled("rsor  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[t]", Style::default().fg(Color::White)),
             Span::styled("erminal  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[e]", Style::default().fg(Color::White)),
@@ -258,12 +322,6 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::raw(query.as_str()),
             Span::styled("_", Style::default().fg(Color::Cyan)),
         ])
-    } else if let Some(ref input) = app.prompt_input {
-        Line::from(vec![
-            Span::styled("Send: ", Style::default().fg(Color::Cyan)),
-            Span::raw(input.as_str()),
-            Span::styled("_", Style::default().fg(Color::Cyan)),
-        ])
     } else if let Some(ref msg) = app.status_message {
         Line::from(Span::styled(
             msg.as_str(),
@@ -272,7 +330,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         let hint = match app.sidebar_focus {
             SidebarFocus::Tree => {
-                "j/k:nav  C-h/C-l:pane  C-t:filter  H/L:fold  /:search  Enter:switch  e:edit  C:claude  T:terminal  a/r:accept/reject  s:send  o:open  n:new  x:close  q:quit"
+                "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
             }
             SidebarFocus::Recents => {
                 "j/k:nav  C-h/C-l:pane  C-t:filter  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"

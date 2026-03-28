@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::claude::{self, ClaudeState};
+use crate::agent::{self, AgentState, DetectStrategy, identify_agent, scrape_pane_state};
 use crate::error::GroveError;
 use crate::tmux::{self, PaneInfo};
 
@@ -9,9 +9,47 @@ pub(crate) fn fetch_panes(verbose: bool) -> Result<Vec<PaneInfo>, GroveError> {
     tmux::list_all_panes(verbose)
 }
 
-/// Fetch Claude states from the external hook state file.
-pub(crate) fn fetch_claude_states() -> Result<HashMap<String, ClaudeState>, GroveError> {
-    claude::read_state_file()
+/// Fetch agent states from the external hook state file.
+pub(crate) fn fetch_agent_states() -> Result<HashMap<String, AgentState>, GroveError> {
+    agent::read_state_file()
+}
+
+#[allow(dead_code)]
+const MAX_SCRAPE_PANES: usize = 8;
+#[allow(dead_code)]
+const SKIP_COMMANDS: &[&str] = &[
+    "zsh", "bash", "fish", "vim", "nvim", "tmux", "less", "man", "top", "htop", "grove",
+];
+
+/// Fetch agent states with pane scraping for non-Claude agents.
+#[allow(dead_code)]
+pub(crate) fn fetch_agent_states_with_scraping(
+    panes: &[PaneInfo],
+    verbose: bool,
+) -> Result<HashMap<String, AgentState>, GroveError> {
+    let mut states = agent::read_state_file()?;
+
+    let mut scraped = 0;
+    for pane in panes {
+        if scraped >= MAX_SCRAPE_PANES {
+            break;
+        }
+        if states.contains_key(&pane.pane_id) {
+            continue;
+        }
+        if SKIP_COMMANDS.contains(&pane.current_command.as_str()) {
+            continue;
+        }
+        if let Some(def) = identify_agent(pane)
+            && matches!(def.detect, DetectStrategy::PaneScrape { .. })
+        {
+            let state = scrape_pane_state(&pane.pane_id, def, verbose);
+            states.insert(pane.pane_id.clone(), state);
+            scraped += 1;
+        }
+    }
+
+    Ok(states)
 }
 
 /// Capture the visible content of a tmux pane.

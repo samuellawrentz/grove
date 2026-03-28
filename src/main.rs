@@ -1,4 +1,4 @@
-mod claude;
+mod agent;
 mod cli;
 mod commands;
 mod config;
@@ -56,6 +56,8 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             interactive,
             no_tmux,
             no_claude,
+            no_agent,
+            agent,
             no_attach,
         } => {
             let task_id = match task_id {
@@ -81,13 +83,28 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                 base: base.as_deref(),
                 interactive,
                 no_tmux,
-                no_claude,
+                no_claude: no_claude || no_agent,
                 no_attach,
+                agent: agent.as_deref(),
             };
             commands::init::run(&task_id, &opts, &config, &mut state, json_mode, verbose)?;
         }
-        Commands::Close { task_id, force } => {
-            commands::close::run(&task_id, force, &config, &mut state, json_mode, verbose)?;
+        Commands::Close {
+            task_id,
+            force,
+            delete_branches,
+            interactive,
+        } => {
+            commands::close::run(
+                task_id.as_deref(),
+                force,
+                delete_branches,
+                interactive,
+                &config,
+                &mut state,
+                json_mode,
+                verbose,
+            )?;
         }
         Commands::List => {
             commands::list::run(&state, &config, json_mode, verbose)?;

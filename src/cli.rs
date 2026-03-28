@@ -67,6 +67,12 @@ pub enum Commands {
         /// Skip Claude launch (default in Phase 1)
         #[arg(long)]
         no_claude: bool,
+        /// Skip all agent launches
+        #[arg(long)]
+        no_agent: bool,
+        /// Which agent to launch (overrides default)
+        #[arg(long)]
+        agent: Option<String>,
         /// Skip auto-attach to tmux window
         #[arg(long)]
         no_attach: bool,
@@ -74,11 +80,17 @@ pub enum Commands {
 
     /// Close a task and remove its worktrees
     Close {
-        /// Task identifier
-        task_id: String,
+        /// Task identifier (prompted in interactive mode if omitted)
+        task_id: Option<String>,
         /// Force close even with uncommitted changes
         #[arg(long)]
         force: bool,
+        /// Also delete task branches from bare repos
+        #[arg(long, short = 'D')]
+        delete_branches: bool,
+        /// Interactive mode: select task from list
+        #[arg(short, long)]
+        interactive: bool,
     },
 
     /// List active tasks

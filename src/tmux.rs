@@ -11,6 +11,7 @@ pub struct PaneInfo {
     pub window_name: String,
     pub current_path: PathBuf,
     pub current_command: String,
+    pub start_command: String,
     pub pid: u32,
     pub activity: u64,
 }
@@ -130,7 +131,7 @@ pub fn get_pane_id(target: &str, verbose: bool) -> Result<String, GroveError> {
 
 /// List all panes across all tmux sessions.
 pub fn list_all_panes(verbose: bool) -> Result<Vec<PaneInfo>, GroveError> {
-    let format_str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_activity}";
+    let format_str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_pid}\t#{pane_activity}";
     let output = run_tmux(&["list-panes", "-a", "-F", format_str], verbose)?;
 
     let mut panes = Vec::new();
@@ -144,7 +145,7 @@ pub fn list_all_panes(verbose: bool) -> Result<Vec<PaneInfo>, GroveError> {
 
 fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
     let parts: Vec<&str> = line.split('\t').collect();
-    if parts.len() < 7 {
+    if parts.len() < 8 {
         return None;
     }
     Some(PaneInfo {
@@ -154,9 +155,24 @@ fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
         window_name: parts[3].to_string(),
         current_path: PathBuf::from(parts[4]),
         current_command: parts[5].to_string(),
-        pid: parts[6].parse().ok()?,
-        activity: parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
+        start_command: parts[6].to_string(),
+        pid: parts[7].parse().ok()?,
+        activity: parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
     })
+}
+
+/// Capture only the last N lines of a tmux pane (for agent detection, not preview).
+#[allow(dead_code)]
+pub fn capture_pane_tail(
+    pane_id: &str,
+    n_lines: usize,
+    verbose: bool,
+) -> Result<String, GroveError> {
+    let start = format!("-{}", n_lines);
+    run_tmux(
+        &["capture-pane", "-t", pane_id, "-p", "-S", &start, "-E", "-"],
+        verbose,
+    )
 }
 
 /// Capture the visible content of a tmux pane (with ANSI color codes).
@@ -292,7 +308,8 @@ mod tests {
 
     #[test]
     fn test_parse_pane_info_line_valid() {
-        let line = "%42\tmain\t1\tgrove-task-1\t/home/user/src/grove\tclaude\t12345\t1700000000";
+        let line =
+            "%42\tmain\t1\tgrove-task-1\t/home/user/src/grove\tclaude\tclaude\t12345\t1700000000";
         let pane = parse_pane_info_line(line).expect("should parse valid line");
         assert_eq!(pane.pane_id, "%42");
         assert_eq!(pane.session_name, "main");
@@ -300,6 +317,7 @@ mod tests {
         assert_eq!(pane.window_name, "grove-task-1");
         assert_eq!(pane.current_path, PathBuf::from("/home/user/src/grove"));
         assert_eq!(pane.current_command, "claude");
+        assert_eq!(pane.start_command, "claude");
         assert_eq!(pane.pid, 12345);
         assert_eq!(pane.activity, 1700000000);
     }
@@ -312,13 +330,13 @@ mod tests {
 
     #[test]
     fn test_parse_pane_info_line_invalid_window_index() {
-        let line = "%42\tmain\tnotanumber\twindow\t/path\tzsh\t999";
+        let line = "%42\tmain\tnotanumber\twindow\t/path\tzsh\tzsh\t999";
         assert!(parse_pane_info_line(line).is_none());
     }
 
     #[test]
     fn test_parse_pane_info_line_invalid_pid() {
-        let line = "%42\tmain\t1\twindow\t/path\tzsh\tnotapid";
+        let line = "%42\tmain\t1\twindow\t/path\tzsh\tzsh\tnotapid";
         assert!(parse_pane_info_line(line).is_none());
     }
 }

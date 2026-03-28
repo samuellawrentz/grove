@@ -1,4 +1,4 @@
-use crate::claude;
+use crate::agent;
 use crate::error::GroveError;
 use crate::output;
 use crate::state::GroveState;
@@ -25,15 +25,15 @@ pub fn run(
         GroveError::TmuxNotRunning(format!("tmux window for task '{task_id}' no longer exists"))
     })?;
 
-    // Check Claude state — read file once, look up pane
-    let claude_states = claude::read_state_file().unwrap_or_default();
-    let claude_state = claude_states
+    // Check agent state — read file once, look up pane
+    let agent_states = agent::read_state_file().unwrap_or_default();
+    let agent_state = agent_states
         .get(&live_pane_id)
         .cloned()
-        .unwrap_or(claude::ClaudeState::NotRunning);
-    if claude_state != claude::ClaudeState::Waiting {
+        .unwrap_or(agent::AgentState::NotRunning);
+    if agent_state != agent::AgentState::Waiting {
         return Err(GroveError::General(format!(
-            "Claude is not waiting for input (current state: {claude_state}). \
+            "Agent is not waiting for input (current state: {agent_state}). \
              Ensure claude-tmux-status.sh hook is running if state seems wrong."
         )));
     }

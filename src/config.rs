@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -79,6 +81,8 @@ pub struct GroveConfig {
     pub tmux: TmuxConfig,
     #[serde(default)]
     pub git: GitConfig,
+    #[serde(default)]
+    pub agent_commands: HashMap<String, String>,
 }
 
 fn default_repos_dir() -> PathBuf {
@@ -125,11 +129,28 @@ impl Default for GroveConfig {
             claude_command: default_claude_command(),
             tmux: TmuxConfig::default(),
             git: GitConfig::default(),
+            agent_commands: HashMap::new(),
         }
     }
 }
 
 impl GroveConfig {
+    /// Resolve the command for an agent.
+    /// Precedence: agent_commands["name"] > claude_command (for claude) > AgentDef.default_command
+    pub fn resolved_agent_command(&self, agent_name: &str) -> String {
+        if let Some(cmd) = self.agent_commands.get(agent_name) {
+            return cmd.clone();
+        }
+        if agent_name == "claude" {
+            return self.claude_command.clone();
+        }
+        crate::agent::AGENT_REGISTRY
+            .iter()
+            .find(|d| d.display_name.eq_ignore_ascii_case(agent_name))
+            .map(|d| d.default_command.to_string())
+            .unwrap_or_else(|| agent_name.to_string())
+    }
+
     /// Load config with precedence: file < env < cli overrides.
     /// Auto-creates ~/.grove/ if it does not exist.
     pub fn load(

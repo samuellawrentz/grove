@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::claude::ClaudeState;
+use crate::agent::{AgentFilter, AgentInfo, AgentState, detect_agent_in_pane};
 use crate::tmux::PaneInfo;
 
 /// A group of panes sharing the same working directory basename.
@@ -16,7 +16,7 @@ pub(crate) struct TreeGroup {
 /// A single pane entry within a group.
 pub(crate) struct TreePane {
     pub pane_info: PaneInfo,
-    pub claude_state: Option<ClaudeState>,
+    pub agent: Option<AgentInfo>,
 }
 
 /// State for the tree view: groups, cursor, and scroll.
@@ -25,8 +25,7 @@ pub(crate) struct TreeState {
     pub cursor: usize,
     pub scroll_offset: usize,
     pub search_filter: Option<String>,
-    /// When Some(true), only show Claude panes; Some(false), only non-Claude; None, show all.
-    pub claude_filter: Option<bool>,
+    pub agent_filter: AgentFilter,
 }
 
 impl TreeState {
@@ -35,16 +34,16 @@ impl TreeState {
     #[cfg(test)]
     pub fn build(
         panes: &[PaneInfo],
-        claude_states: &HashMap<String, ClaudeState>,
+        agent_states: &HashMap<String, AgentState>,
         exclude_pane_id: &str,
     ) -> Self {
-        let groups = build_groups(panes, claude_states, exclude_pane_id, &[]);
+        let groups = build_groups(panes, agent_states, exclude_pane_id, &[]);
         TreeState {
             groups,
             cursor: 0,
             scroll_offset: 0,
             search_filter: None,
-            claude_filter: None,
+            agent_filter: AgentFilter::All,
         }
     }
 
@@ -52,7 +51,7 @@ impl TreeState {
     pub fn rebuild(
         &mut self,
         panes: &[PaneInfo],
-        claude_states: &HashMap<String, ClaudeState>,
+        agent_states: &HashMap<String, AgentState>,
         exclude_pane_id: &str,
     ) {
         let old_expanded: Vec<(String, bool)> = self
@@ -60,7 +59,7 @@ impl TreeState {
             .iter()
             .map(|g| (g.name.clone(), g.expanded))
             .collect();
-        self.groups = build_groups(panes, claude_states, exclude_pane_id, &old_expanded);
+        self.groups = build_groups(panes, agent_states, exclude_pane_id, &old_expanded);
         // Clamp cursor to valid range
         let count = self.visible_count();
         if count == 0 {
@@ -149,16 +148,17 @@ impl TreeState {
             Some(query) if !query.is_empty() => pane_matches_filter(pane, group_name, query),
             _ => true,
         };
-        let claude_ok = if searching {
+        let agent_ok = if searching {
             true
         } else {
-            match self.claude_filter {
-                Some(true) => pane.claude_state.is_some(),
-                Some(false) => pane.claude_state.is_none(),
-                None => true,
+            match &self.agent_filter {
+                AgentFilter::All => true,
+                AgentFilter::AnyAgent => pane.agent.is_some(),
+                AgentFilter::Specific(kind) => pane.agent.as_ref().is_some_and(|a| a.kind == *kind),
+                AgentFilter::NonAgent => pane.agent.is_none(),
             }
         };
-        search_ok && claude_ok
+        search_ok && agent_ok
     }
 
     /// Get positions of all visible pane rows (not group headers), respecting search filter.
@@ -360,7 +360,7 @@ fn shorten_path(path: &std::path::Path) -> String {
 
 fn build_groups(
     panes: &[PaneInfo],
-    claude_states: &HashMap<String, ClaudeState>,
+    agent_states: &HashMap<String, AgentState>,
     exclude_pane_id: &str,
     old_expanded: &[(String, bool)],
 ) -> Vec<TreeGroup> {
@@ -378,14 +378,7 @@ fn build_groups(
             continue;
         }
 
-        // Claude detection: state file primary, command name fallback
-        let claude_state = if let Some(state) = claude_states.get(&pane.pane_id) {
-            Some(state.clone())
-        } else if pane.current_command.contains("claude") {
-            Some(ClaudeState::Active)
-        } else {
-            None
-        };
+        let agent = detect_agent_in_pane(pane, agent_states);
 
         let tree_pane = TreePane {
             pane_info: PaneInfo {
@@ -395,10 +388,11 @@ fn build_groups(
                 window_name: pane.window_name.clone(),
                 current_path: pane.current_path.clone(),
                 current_command: pane.current_command.clone(),
+                start_command: pane.start_command.clone(),
                 pid: pane.pid,
                 activity: pane.activity,
             },
-            claude_state,
+            agent,
         };
 
         let parent = pane
@@ -461,6 +455,7 @@ fn build_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{AgentInfo, AgentKind, AgentState};
     use std::path::PathBuf;
 
     fn make_pane(id: &str, session: &str, win_idx: u32, path: &str, cmd: &str) -> PaneInfo {
@@ -482,6 +477,7 @@ mod tests {
             window_name: win_name.to_string(),
             current_path: PathBuf::from(path),
             current_command: cmd.to_string(),
+            start_command: String::new(),
             pid: 1000,
             activity: 0,
         }
@@ -559,37 +555,35 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_detection_from_state_file() {
+    fn test_agent_detection_from_state_file() {
         let panes = vec![make_pane("%1", "main", 0, "/home/user/src/grove", "zsh")];
         let mut states = HashMap::new();
-        states.insert("%1".to_string(), ClaudeState::Waiting);
+        states.insert("%1".to_string(), AgentState::Waiting);
         let tree = TreeState::build(&panes, &states, "");
 
-        assert_eq!(
-            tree.groups[0].panes[0].claude_state,
-            Some(ClaudeState::Waiting)
-        );
+        let agent = tree.groups[0].panes[0].agent.as_ref().unwrap();
+        assert_eq!(agent.kind, AgentKind::Claude);
+        assert_eq!(agent.state, AgentState::Waiting);
     }
 
     #[test]
-    fn test_claude_detection_from_command_fallback() {
+    fn test_agent_detection_from_command_fallback() {
         let panes = vec![make_pane("%1", "main", 0, "/home/user/src/grove", "claude")];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        assert_eq!(
-            tree.groups[0].panes[0].claude_state,
-            Some(ClaudeState::Active)
-        );
+        let agent = tree.groups[0].panes[0].agent.as_ref().unwrap();
+        assert_eq!(agent.kind, AgentKind::Claude);
+        assert_eq!(agent.state, AgentState::Active);
     }
 
     #[test]
-    fn test_non_claude_pane() {
+    fn test_non_agent_pane() {
         let panes = vec![make_pane("%1", "main", 0, "/home/user/src/grove", "vim")];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        assert_eq!(tree.groups[0].panes[0].claude_state, None);
+        assert!(tree.groups[0].panes[0].agent.is_none());
     }
 
     #[test]

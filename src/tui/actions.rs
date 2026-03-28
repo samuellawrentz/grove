@@ -1,6 +1,6 @@
 use crossterm::event::KeyEvent;
 
-use crate::claude::ClaudeState;
+use crate::agent::{AGENT_REGISTRY, AgentFilter, AgentKind, AgentState};
 use crate::{recents, tmux};
 
 use super::app::{App, SidebarFocus};
@@ -97,7 +97,19 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     if let Some(dir) = app.open_prompt_dir.take() {
         match key.code {
             KeyCode::Char('c') => {
-                let cmd = app.claude_command.clone();
+                let cmd = app.default_agent_command.clone();
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
+            KeyCode::Char('o') => {
+                let cmd = agent_command_for("opencode");
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
+            KeyCode::Char('x') => {
+                let cmd = agent_command_for("codex");
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
+            KeyCode::Char('u') => {
+                let cmd = agent_command_for("cursor");
                 launch_in_new_window(app, &dir, Some(&cmd));
             }
             KeyCode::Char('t') => {
@@ -140,10 +152,18 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.tree.claude_filter = match app.tree.claude_filter {
-                Some(true) => Some(false),
-                Some(false) => None,
-                None => Some(true),
+            app.tree.agent_filter = match &app.tree.agent_filter {
+                AgentFilter::All => AgentFilter::AnyAgent,
+                AgentFilter::AnyAgent => AgentFilter::Specific(AgentKind::Claude),
+                AgentFilter::Specific(AgentKind::Claude) => {
+                    AgentFilter::Specific(AgentKind::OpenCode)
+                }
+                AgentFilter::Specific(AgentKind::OpenCode) => {
+                    AgentFilter::Specific(AgentKind::Codex)
+                }
+                AgentFilter::Specific(AgentKind::Codex) => AgentFilter::Specific(AgentKind::Cursor),
+                AgentFilter::Specific(AgentKind::Cursor) => AgentFilter::NonAgent,
+                AgentFilter::NonAgent => AgentFilter::All,
             };
             app.tree.jump_first_pane();
             update_scroll(app);
@@ -201,17 +221,35 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('a') => {
             if let Some(pane) = app.tree.selected_pane()
-                && pane.claude_state == Some(ClaudeState::Waiting)
+                && pane
+                    .agent
+                    .as_ref()
+                    .is_some_and(|a| a.state == AgentState::Waiting)
             {
-                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, &["Enter"], app.verbose);
+                let keys: &[&str] = pane
+                    .agent
+                    .as_ref()
+                    .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
+                    .map(|d| d.accept_keys)
+                    .unwrap_or(&["Enter"]);
+                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
                 app.refresh_tree();
             }
         }
         KeyCode::Char('r') => {
             if let Some(pane) = app.tree.selected_pane()
-                && pane.claude_state == Some(ClaudeState::Waiting)
+                && pane
+                    .agent
+                    .as_ref()
+                    .is_some_and(|a| a.state == AgentState::Waiting)
             {
-                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, &["n", "Enter"], app.verbose);
+                let keys: &[&str] = pane
+                    .agent
+                    .as_ref()
+                    .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
+                    .map(|d| d.reject_keys)
+                    .unwrap_or(&["n", "Enter"]);
+                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
                 app.refresh_tree();
             }
         }
@@ -237,7 +275,25 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('C') => {
-            let cmd = app.claude_command.clone();
+            let cmd = app.default_agent_command.clone();
+            if let Some((target, cwd)) = selected_target_cwd(app) {
+                launch_split(app, &target, &cwd, Some(&cmd));
+            }
+        }
+        KeyCode::Char('O') => {
+            let cmd = agent_command_for("opencode");
+            if let Some((target, cwd)) = selected_target_cwd(app) {
+                launch_split(app, &target, &cwd, Some(&cmd));
+            }
+        }
+        KeyCode::Char('X') => {
+            let cmd = agent_command_for("codex");
+            if let Some((target, cwd)) = selected_target_cwd(app) {
+                launch_split(app, &target, &cwd, Some(&cmd));
+            }
+        }
+        KeyCode::Char('U') => {
+            let cmd = agent_command_for("cursor");
             if let Some((target, cwd)) = selected_target_cwd(app) {
                 launch_split(app, &target, &cwd, Some(&cmd));
             }
@@ -282,7 +338,7 @@ fn handle_recents_key(app: &mut App, key: KeyEvent) {
                 .path
                 .to_string_lossy()
                 .to_string();
-            let cmd = format!("{} -c", app.claude_command);
+            let cmd = format!("{} -c", app.default_agent_command);
             launch_in_new_window(app, &dir, Some(&cmd));
         }
         KeyCode::Char('n') => {
@@ -290,7 +346,7 @@ fn handle_recents_key(app: &mut App, key: KeyEvent) {
                 .path
                 .to_string_lossy()
                 .to_string();
-            let cmd = app.claude_command.clone();
+            let cmd = app.default_agent_command.clone();
             launch_in_new_window(app, &dir, Some(&cmd));
         }
         KeyCode::Char('t') => {
@@ -357,6 +413,15 @@ fn launch_in_new_window(app: &mut App, dir: &str, cmd: Option<&str>) {
             app.status_message = Some(format!("new window failed: {e}"));
         }
     }
+}
+
+/// Look up the default command for an agent by name from the registry.
+fn agent_command_for(name: &str) -> String {
+    AGENT_REGISTRY
+        .iter()
+        .find(|d| d.display_name.eq_ignore_ascii_case(name))
+        .map(|d| d.default_command.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// Keep scroll_offset in sync with cursor position.
