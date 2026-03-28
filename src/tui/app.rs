@@ -34,6 +34,7 @@ pub(crate) struct App {
     /// Directory picked by fzf, awaiting open-prompt sub-choice.
     pub open_prompt_dir: Option<String>,
     pub preview_scroll_up: u16,
+    pub diff_mode: bool,
     pub default_agent_command: String,
     pub sidebar_focus: SidebarFocus,
     pub recents: Vec<RecentEntry>,
@@ -74,6 +75,7 @@ impl App {
             pending_fzf: false,
             open_prompt_dir: None,
             preview_scroll_up: 0,
+            diff_mode: false,
             default_agent_command,
             sidebar_focus: SidebarFocus::Tree,
             recents: recents::load(),
@@ -104,6 +106,24 @@ impl App {
 
     /// Refresh preview content for the selected pane.
     pub fn refresh_preview(&mut self) {
+        if self.diff_mode {
+            let dir = self
+                .tree
+                .selected_group()
+                .map(|g| g.path.clone())
+                .or_else(|| {
+                    self.tree
+                        .selected_pane()
+                        .map(|p| p.pane_info.current_path.clone())
+                });
+            if let Some(path) = dir {
+                match source::fetch_git_diffs(&path) {
+                    Ok(content) => self.preview_content = content,
+                    Err(e) => self.status_message = Some(format!("Git diff error: {e}")),
+                }
+            }
+            return;
+        }
         if let Some(pane_id) = self.tree.selected_pane_id().map(|s| s.to_string()) {
             match source::fetch_preview(&pane_id, self.verbose) {
                 Ok(content) => {

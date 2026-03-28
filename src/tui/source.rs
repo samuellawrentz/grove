@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
 
 use crate::agent::{self, identify_agent, scrape_pane_state, AgentState, DetectStrategy};
 use crate::error::GroveError;
@@ -90,6 +92,85 @@ pub(crate) fn fetch_directory_listing(path: &std::path::Path) -> Result<String, 
     for f in &files {
         output.push_str(f);
         output.push('\n');
+    }
+
+    Ok(output)
+}
+
+const MAX_REPOS: usize = 5;
+const MAX_LINES_PER_REPO: usize = 500;
+
+/// Find git repos in a directory (the dir itself + immediate children), run git diff.
+pub(crate) fn fetch_git_diffs(dir: &Path) -> Result<String, GroveError> {
+    let mut repos: Vec<std::path::PathBuf> = Vec::new();
+
+    // Check if dir itself is a repo
+    if dir.join(".git").exists() {
+        repos.push(dir.to_path_buf());
+    }
+
+    // Check immediate children
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if repos.len() >= MAX_REPOS {
+                break;
+            }
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").exists() {
+                repos.push(path);
+            }
+        }
+    }
+
+    if repos.is_empty() {
+        return Ok("No git repositories found".to_string());
+    }
+
+    let mut output = String::new();
+    for (i, repo) in repos.iter().enumerate() {
+        if i > 0 {
+            output.push('\n');
+        }
+        let name = repo.to_string_lossy();
+        output.push_str(&format!("━━━ {} ━━━\n", name));
+
+        let stat = Command::new("git")
+            .args(["-C", &name, "diff", "--stat"])
+            .output();
+        let diff = Command::new("git")
+            .args(["-C", &name, "diff", "--color=always"])
+            .output();
+
+        match (stat, diff) {
+            (Ok(s), Ok(d)) => {
+                let stat_out = String::from_utf8_lossy(&s.stdout);
+                let diff_out = String::from_utf8_lossy(&d.stdout);
+                if stat_out.is_empty() && diff_out.is_empty() {
+                    output.push_str("No changes\n");
+                } else {
+                    if !stat_out.is_empty() {
+                        output.push_str(&stat_out);
+                        output.push('\n');
+                    }
+                    // Cap diff lines
+                    let lines: Vec<&str> = diff_out.lines().collect();
+                    let capped = lines.len() > MAX_LINES_PER_REPO;
+                    for line in lines.iter().take(MAX_LINES_PER_REPO) {
+                        output.push_str(line);
+                        output.push('\n');
+                    }
+                    if capped {
+                        output.push_str(&format!(
+                            "... truncated ({} lines total)\n",
+                            lines.len()
+                        ));
+                    }
+                }
+            }
+            _ => {
+                output.push_str("Failed to run git diff\n");
+            }
+        }
     }
 
     Ok(output)

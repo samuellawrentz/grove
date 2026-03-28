@@ -170,6 +170,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.refresh_preview();
             return;
         }
+        KeyCode::Char('d') => {
+            app.diff_mode = !app.diff_mode;
+            app.preview_scroll_up = 0;
+            app.refresh_preview();
+            return;
+        }
         KeyCode::Char('/') => {
             app.search_input = Some(String::new());
             return;

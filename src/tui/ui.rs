@@ -237,7 +237,9 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         }
         AgentFilter::NonAgent => " [other] ".to_string(),
     };
-    let title = if let Some(pane_id) = app.tree.selected_pane_id() {
+    let title = if app.diff_mode {
+        " Git Diff ".to_string()
+    } else if let Some(pane_id) = app.tree.selected_pane_id() {
         format!(" Preview{}-- {pane_id} ", filter_label)
     } else {
         format!(" Preview{}", filter_label)
@@ -330,10 +332,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         let hint = match app.sidebar_focus {
             SidebarFocus::Tree => {
-                "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
+                "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
             }
             SidebarFocus::Recents => {
-                "j/k:nav  C-h/C-l:pane  C-t:filter  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"
+                "j/k:nav  C-h/C-l:pane  C-t:filter  d:diff  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"
             }
         };
         Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
