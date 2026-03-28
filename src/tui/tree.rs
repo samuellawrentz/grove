@@ -448,7 +448,7 @@ fn build_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentInfo, AgentKind, AgentState};
+    use crate::agent::{AgentKind, AgentState};
     use std::path::PathBuf;
 
     fn make_pane(id: &str, session: &str, win_idx: u32, path: &str, cmd: &str) -> PaneInfo {
