@@ -64,12 +64,12 @@ pub fn run(
     }
 
     // Kill tmux window if present
-    if let Some(ref target) = task.tmux_window
-        && let Err(e) = crate::tmux::kill_window(target, verbose)
-    {
-        // Don't block close on tmux failure — window may already be gone
-        if verbose {
-            eprintln!("Warning: failed to kill tmux window: {e}");
+    if let Some(ref target) = task.tmux_window {
+        if let Err(e) = crate::tmux::kill_window(target, verbose) {
+            // Don't block close on tmux failure — window may already be gone
+            if verbose {
+                eprintln!("Warning: failed to kill tmux window: {e}");
+            }
         }
     }
 
@@ -134,20 +134,20 @@ pub fn run(
                 .get(&task_repo.repo_name)
                 .map(|r| r.path.clone());
 
-            if let Some(bp) = bare_path
-                && bp.exists()
-            {
-                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, verbose) {
-                    warnings.push(format!(
-                        "failed to delete branch '{}' from '{}': {e}",
-                        task_repo.branch, task_repo.repo_name
-                    ));
-                }
-                if let Err(e) = git::prune_worktrees(&bp, verbose) {
-                    warnings.push(format!(
-                        "failed to prune worktrees for '{}': {e}",
-                        task_repo.repo_name
-                    ));
+            if let Some(bp) = bare_path {
+                if bp.exists() {
+                    if let Err(e) = git::delete_branch(&bp, &task_repo.branch, verbose) {
+                        warnings.push(format!(
+                            "failed to delete branch '{}' from '{}': {e}",
+                            task_repo.branch, task_repo.repo_name
+                        ));
+                    }
+                    if let Err(e) = git::prune_worktrees(&bp, verbose) {
+                        warnings.push(format!(
+                            "failed to prune worktrees for '{}': {e}",
+                            task_repo.repo_name
+                        ));
+                    }
                 }
             }
         }

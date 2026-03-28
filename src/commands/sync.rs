@@ -117,10 +117,10 @@ pub fn run(
     // Update last_synced_at for successful repos
     let now = Utc::now();
     for r in &results {
-        if r.ok
-            && let Some(entry) = state.repos.get_mut(&r.repo)
-        {
-            entry.last_synced_at = Some(now);
+        if r.ok {
+            if let Some(entry) = state.repos.get_mut(&r.repo) {
+                entry.last_synced_at = Some(now);
+            }
         }
     }
     state.save()?;

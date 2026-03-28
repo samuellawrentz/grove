@@ -68,11 +68,15 @@ pub struct AgentInfo {
 #[allow(dead_code)]
 pub enum DetectStrategy {
     StateFile {
+        #[allow(dead_code)]
         path: &'static str,
     },
     PaneScrape {
+        #[allow(dead_code)]
         active_re: Option<Regex>,
+        #[allow(dead_code)]
         waiting_re: Option<Regex>,
+        #[allow(dead_code)]
         approval_re: Regex,
     },
 }
@@ -81,6 +85,7 @@ pub enum DetectStrategy {
 pub struct AgentDef {
     pub kind: AgentKind,
     pub command_names: &'static [&'static str],
+    #[allow(dead_code)]
     pub detect: DetectStrategy,
     pub icon_active: &'static str,
     pub icon_waiting: &'static str,
@@ -232,15 +237,15 @@ pub fn scrape_pane_state(pane_id: &str, def: &AgentDef, verbose: bool) -> AgentS
         if approval_re.is_match(&content) {
             return AgentState::Waiting;
         }
-        if let Some(re) = active_re
-            && re.is_match(&content)
-        {
-            return AgentState::Active;
+        if let Some(re) = active_re {
+            if re.is_match(&content) {
+                return AgentState::Active;
+            }
         }
-        if let Some(re) = waiting_re
-            && re.is_match(&content)
-        {
-            return AgentState::NotRunning;
+        if let Some(re) = waiting_re {
+            if re.is_match(&content) {
+                return AgentState::NotRunning;
+            }
         }
         AgentState::Active
     } else {

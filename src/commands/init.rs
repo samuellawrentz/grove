@@ -111,15 +111,16 @@ pub fn run(
                 "Warning: task '{task_id}' has stale state (directories missing). Re-creating."
             );
             for task_repo in &existing.repos {
-                if let Some(repo_entry) = state.repos.get(&task_repo.repo_name)
-                    && repo_entry.path.exists()
-                {
-                    let _ = git::run_git(&["worktree", "prune"], Some(&repo_entry.path), verbose);
-                    let _ = git::run_git(
-                        &["branch", "-D", &task_repo.branch],
-                        Some(&repo_entry.path),
-                        verbose,
-                    );
+                if let Some(repo_entry) = state.repos.get(&task_repo.repo_name) {
+                    if repo_entry.path.exists() {
+                        let _ =
+                            git::run_git(&["worktree", "prune"], Some(&repo_entry.path), verbose);
+                        let _ = git::run_git(
+                            &["branch", "-D", &task_repo.branch],
+                            Some(&repo_entry.path),
+                            verbose,
+                        );
+                    }
                 }
             }
             state.tasks.remove(task_id);
@@ -251,11 +252,10 @@ pub fn run(
     state.save()?;
 
     // Auto-attach AFTER state save (select_window doesn't block like attach_session)
-    if let Some(ref target) = tmux_window
-        && config.auto_attach
-        && !opts.no_attach
-    {
-        let _ = tmux::select_window(target, verbose);
+    if let Some(ref target) = tmux_window {
+        if config.auto_attach && !opts.no_attach {
+            let _ = tmux::select_window(target, verbose);
+        }
     }
 
     let data = serde_json::json!({

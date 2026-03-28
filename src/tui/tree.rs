@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::agent::{AgentFilter, AgentInfo, AgentState, detect_agent_in_pane};
+use crate::agent::{detect_agent_in_pane, AgentFilter, AgentInfo, AgentState};
 use crate::tmux::PaneInfo;
 
 /// A group of panes sharing the same working directory basename.
@@ -234,37 +234,37 @@ impl TreeState {
 
     /// Collapse the group containing the cursor, moving cursor to group header.
     pub fn collapse_current_group(&mut self) {
-        if let Some(group_idx) = self.cursor_group_index()
-            && self.groups[group_idx].expanded
-        {
-            let mut header_pos = 0;
-            for i in 0..group_idx {
-                header_pos += 1;
-                if self.groups[i].expanded {
-                    header_pos += self.groups[i].panes.len();
+        if let Some(group_idx) = self.cursor_group_index() {
+            if self.groups[group_idx].expanded {
+                let mut header_pos = 0;
+                for i in 0..group_idx {
+                    header_pos += 1;
+                    if self.groups[i].expanded {
+                        header_pos += self.groups[i].panes.len();
+                    }
                 }
+                self.groups[group_idx].expanded = false;
+                self.cursor = header_pos;
             }
-            self.groups[group_idx].expanded = false;
-            self.cursor = header_pos;
         }
     }
 
     /// Expand the group containing the cursor, moving cursor to its first pane.
     pub fn expand_current_group(&mut self) {
-        if let Some(group_idx) = self.cursor_group_index()
-            && !self.groups[group_idx].expanded
-        {
-            self.groups[group_idx].expanded = true;
-            let mut first_pane_pos = 0;
-            for i in 0..group_idx {
-                first_pane_pos += 1;
-                if self.groups[i].expanded {
-                    first_pane_pos += self.groups[i].panes.len();
+        if let Some(group_idx) = self.cursor_group_index() {
+            if !self.groups[group_idx].expanded {
+                self.groups[group_idx].expanded = true;
+                let mut first_pane_pos = 0;
+                for i in 0..group_idx {
+                    first_pane_pos += 1;
+                    if self.groups[i].expanded {
+                        first_pane_pos += self.groups[i].panes.len();
+                    }
                 }
-            }
-            first_pane_pos += 1; // skip this group's header
-            if !self.groups[group_idx].panes.is_empty() {
-                self.cursor = first_pane_pos;
+                first_pane_pos += 1; // skip this group's header
+                if !self.groups[group_idx].panes.is_empty() {
+                    self.cursor = first_pane_pos;
+                }
             }
         }
     }

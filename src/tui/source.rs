@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::agent::{self, AgentState, DetectStrategy, identify_agent, scrape_pane_state};
+use crate::agent::{self, identify_agent, scrape_pane_state, AgentState, DetectStrategy};
 use crate::error::GroveError;
 use crate::tmux::{self, PaneInfo};
 
@@ -40,12 +40,12 @@ pub(crate) fn fetch_agent_states_with_scraping(
         if SKIP_COMMANDS.contains(&pane.current_command.as_str()) {
             continue;
         }
-        if let Some(def) = identify_agent(pane)
-            && matches!(def.detect, DetectStrategy::PaneScrape { .. })
-        {
-            let state = scrape_pane_state(&pane.pane_id, def, verbose);
-            states.insert(pane.pane_id.clone(), state);
-            scraped += 1;
+        if let Some(def) = identify_agent(pane) {
+            if matches!(def.detect, DetectStrategy::PaneScrape { .. }) {
+                let state = scrape_pane_state(&pane.pane_id, def, verbose);
+                states.insert(pane.pane_id.clone(), state);
+                scraped += 1;
+            }
         }
     }
 

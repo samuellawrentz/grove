@@ -1,6 +1,6 @@
 use crossterm::event::KeyEvent;
 
-use crate::agent::{AGENT_REGISTRY, AgentFilter, AgentKind, AgentState};
+use crate::agent::{AgentFilter, AgentKind, AgentState, AGENT_REGISTRY};
 use crate::{recents, tmux};
 
 use super::app::{App, SidebarFocus};
@@ -71,11 +71,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
                 let text = input.clone();
-                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string())
-                    && !text.is_empty()
-                {
-                    let _ = tmux::send_keys(&pane_id, &text, app.verbose);
-                    app.refresh_tree();
+                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
+                    if !text.is_empty() {
+                        let _ = tmux::send_keys(&pane_id, &text, app.verbose);
+                        app.refresh_tree();
+                    }
                 }
                 app.prompt_input = None;
             }
@@ -220,37 +220,39 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('a') => {
-            if let Some(pane) = app.tree.selected_pane()
-                && pane
+            if let Some(pane) = app.tree.selected_pane() {
+                if pane
                     .agent
                     .as_ref()
                     .is_some_and(|a| a.state == AgentState::Waiting)
-            {
-                let keys: &[&str] = pane
-                    .agent
-                    .as_ref()
-                    .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
-                    .map(|d| d.accept_keys)
-                    .unwrap_or(&["Enter"]);
-                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
-                app.refresh_tree();
+                {
+                    let keys: &[&str] = pane
+                        .agent
+                        .as_ref()
+                        .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
+                        .map(|d| d.accept_keys)
+                        .unwrap_or(&["Enter"]);
+                    let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
+                    app.refresh_tree();
+                }
             }
         }
         KeyCode::Char('r') => {
-            if let Some(pane) = app.tree.selected_pane()
-                && pane
+            if let Some(pane) = app.tree.selected_pane() {
+                if pane
                     .agent
                     .as_ref()
                     .is_some_and(|a| a.state == AgentState::Waiting)
-            {
-                let keys: &[&str] = pane
-                    .agent
-                    .as_ref()
-                    .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
-                    .map(|d| d.reject_keys)
-                    .unwrap_or(&["n", "Enter"]);
-                let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
-                app.refresh_tree();
+                {
+                    let keys: &[&str] = pane
+                        .agent
+                        .as_ref()
+                        .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
+                        .map(|d| d.reject_keys)
+                        .unwrap_or(&["n", "Enter"]);
+                    let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
+                    app.refresh_tree();
+                }
             }
         }
         KeyCode::Char('s') => {

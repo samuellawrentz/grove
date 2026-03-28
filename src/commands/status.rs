@@ -10,10 +10,10 @@ pub fn run(
     verbose: bool,
 ) -> Result<(), GroveError> {
     // If specific task requested, verify it exists
-    if let Some(id) = task_id
-        && !state.tasks.contains_key(id)
-    {
-        return Err(GroveError::TaskNotFound(id.to_string()));
+    if let Some(id) = task_id {
+        if !state.tasks.contains_key(id) {
+            return Err(GroveError::TaskNotFound(id.to_string()));
+        }
     }
 
     let agent_states = agent::read_state_file().unwrap_or_default();

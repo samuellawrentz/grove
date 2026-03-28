@@ -1,13 +1,13 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crossterm::event::{self, Event};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 
 use crate::error::GroveError;
 
@@ -115,12 +115,12 @@ pub(crate) fn run_event_loop(
                     .output()
             });
 
-            if let Ok(output) = result
-                && output.status.success()
-            {
-                let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !dir.is_empty() {
-                    app.open_prompt_dir = Some(dir);
+            if let Ok(output) = result {
+                if output.status.success() {
+                    let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !dir.is_empty() {
+                        app.open_prompt_dir = Some(dir);
+                    }
                 }
             }
 

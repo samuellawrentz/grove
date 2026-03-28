@@ -1,11 +1,11 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
 use super::app::{App, SidebarFocus};
-use crate::agent::{AGENT_REGISTRY, AgentFilter, AgentState};
+use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
 use crate::recents;
 
 /// Draw the TUI frame.
