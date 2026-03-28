@@ -14,6 +14,7 @@ const STATE_FILE: &str = "/tmp/claude-panes.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum AgentKind {
     Claude,
     OpenCode,
@@ -34,6 +35,7 @@ impl fmt::Display for AgentKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum AgentState {
     Active,
     Waiting,
@@ -68,15 +70,11 @@ pub struct AgentInfo {
 #[allow(dead_code)]
 pub enum DetectStrategy {
     StateFile {
-        #[allow(dead_code)]
         path: &'static str,
     },
     PaneScrape {
-        #[allow(dead_code)]
         active_re: Option<Regex>,
-        #[allow(dead_code)]
         waiting_re: Option<Regex>,
-        #[allow(dead_code)]
         approval_re: Regex,
     },
 }
@@ -85,7 +83,6 @@ pub enum DetectStrategy {
 pub struct AgentDef {
     pub kind: AgentKind,
     pub command_names: &'static [&'static str],
-    #[allow(dead_code)]
     pub detect: DetectStrategy,
     pub icon_active: &'static str,
     pub icon_waiting: &'static str,

@@ -4,6 +4,8 @@ use std::process::Command;
 use crate::error::GroveError;
 
 /// Information about a single tmux pane.
+#[derive(Clone)]
+#[allow(dead_code)]
 pub struct PaneInfo {
     pub pane_id: String,
     pub session_name: String,

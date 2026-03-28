@@ -21,7 +21,7 @@ pub fn success(json_mode: bool, human: &str, data: Value) {
         }
         println!(
             "{}",
-            serde_json::to_string_pretty(&Value::Object(ordered)).unwrap()
+            serde_json::to_string_pretty(&Value::Object(ordered)).expect("JSON serialization failed")
         );
     } else {
         println!("{human}");
@@ -32,7 +32,7 @@ pub fn success(json_mode: bool, human: &str, data: Value) {
 /// In human mode, prints "Error: {message}" to stderr.
 pub fn error(json_mode: bool, err: &GroveError) {
     if json_mode {
-        println!("{}", serde_json::to_string_pretty(&err.to_json()).unwrap());
+        println!("{}", serde_json::to_string_pretty(&err.to_json()).expect("JSON serialization failed"));
     } else {
         eprintln!("Error: {err}");
     }

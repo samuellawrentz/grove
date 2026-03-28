@@ -60,6 +60,7 @@ pub fn remove(index: usize) {
     }
 }
 
+#[must_use]
 pub fn format_relative_time(timestamp: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

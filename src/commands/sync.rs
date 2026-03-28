@@ -22,15 +22,15 @@ impl Semaphore {
     }
 
     fn acquire(&self) {
-        let mut count = self.count.lock().unwrap();
+        let mut count = self.count.lock().expect("mutex poisoned");
         while *count == 0 {
-            count = self.cond.wait(count).unwrap();
+            count = self.cond.wait(count).expect("mutex poisoned");
         }
         *count -= 1;
     }
 
     fn release(&self) {
-        let mut count = self.count.lock().unwrap();
+        let mut count = self.count.lock().expect("mutex poisoned");
         *count += 1;
         self.cond.notify_one();
     }
@@ -106,13 +106,13 @@ pub fn run(
                         error: Some(e.to_string()),
                     },
                 };
-                results.lock().unwrap().push(sync_result);
+                results.lock().expect("mutex poisoned").push(sync_result);
                 sem.release();
             });
         }
     });
 
-    let results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    let results = Arc::try_unwrap(results).expect("arc still shared").into_inner().expect("mutex poisoned");
 
     // Update last_synced_at for successful repos
     let now = Utc::now();

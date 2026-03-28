@@ -143,12 +143,42 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.sidebar_focus = SidebarFocus::Recents;
             return;
         }
+        KeyCode::Char('j') if app.diff_mode && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut ds) = app.diff_state {
+                ds.move_down_by(10);
+            }
+            return;
+        }
+        KeyCode::Char('k') if app.diff_mode && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut ds) = app.diff_state {
+                ds.move_up_by(10);
+            }
+            return;
+        }
+        KeyCode::Char('j') | KeyCode::Char('J') if app.diff_mode => {
+            if let Some(ref mut ds) = app.diff_state {
+                ds.move_down();
+            }
+            return;
+        }
+        KeyCode::Char('k') | KeyCode::Char('K') if app.diff_mode => {
+            if let Some(ref mut ds) = app.diff_state {
+                ds.move_up();
+            }
+            return;
+        }
         KeyCode::Char('J') => {
             app.preview_scroll_up = app.preview_scroll_up.saturating_sub(3);
             return;
         }
         KeyCode::Char('K') => {
             app.preview_scroll_up = app.preview_scroll_up.saturating_add(3);
+            return;
+        }
+        KeyCode::Char('w') if app.diff_mode => {
+            if let Some(ref mut ds) = app.diff_state {
+                ds.toggle_expand();
+            }
             return;
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -434,7 +464,9 @@ fn agent_command_for(name: &str) -> String {
 
 /// Keep scroll_offset in sync with cursor position.
 fn update_scroll(app: &mut App) {
-    let visible_height = 20_usize;
+    let visible_height = crossterm::terminal::size()
+        .map(|(_, h)| (h as usize).saturating_sub(4))
+        .unwrap_or(20);
 
     if app.tree.cursor < app.tree.scroll_offset {
         app.tree.scroll_offset = app.tree.cursor;

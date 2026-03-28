@@ -251,19 +251,35 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .title(title);
 
     let inner = block.inner(area);
-    use ansi_to_tui::IntoText as _;
-    let text = app
-        .preview_content
-        .into_text()
-        .unwrap_or_else(|_| ratatui::text::Text::raw(&app.preview_content));
+    let text = if app.diff_mode {
+        if let Some(ref ds) = app.diff_state {
+            ratatui::text::Text::from(ds.render())
+        } else {
+            ratatui::text::Text::raw("No diff data")
+        }
+    } else {
+        use ansi_to_tui::IntoText as _;
+        app.preview_content
+            .into_text()
+            .unwrap_or_else(|_| ratatui::text::Text::raw(&app.preview_content))
+    };
     let line_count = text.lines.len();
     let visible_height = inner.height as usize;
-    let max_scroll = if line_count > visible_height {
-        (line_count - visible_height) as u16
+    let scroll = if app.diff_mode {
+        if let Some(ref ds) = app.diff_state {
+            // Keep cursor centered-ish in viewport
+            ds.cursor.saturating_sub(visible_height / 2) as u16
+        } else {
+            0
+        }
     } else {
-        0
+        let max_scroll = if line_count > visible_height {
+            (line_count - visible_height) as u16
+        } else {
+            0
+        };
+        max_scroll.saturating_sub(app.preview_scroll_up)
     };
-    let scroll = max_scroll.saturating_sub(app.preview_scroll_up);
     let preview = Paragraph::new(text).block(block).scroll((scroll, 0));
     f.render_widget(preview, area);
 }
@@ -330,12 +346,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Style::default().fg(Color::Yellow),
         ))
     } else {
-        let hint = match app.sidebar_focus {
-            SidebarFocus::Tree => {
-                "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
-            }
-            SidebarFocus::Recents => {
-                "j/k:nav  C-h/C-l:pane  C-t:filter  d:diff  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"
+        let hint = if app.diff_mode {
+            "j/k:nav  C-j/k:jump10  w:expand/collapse  d:close diff  q:quit"
+        } else {
+            match app.sidebar_focus {
+                SidebarFocus::Tree => {
+                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
+                }
+                SidebarFocus::Recents => {
+                    "j/k:nav  C-h/C-l:pane  C-t:filter  d:diff  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"
+                }
             }
         };
         Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))

@@ -70,6 +70,7 @@ impl TreeState {
     }
 
     /// Get the pane under the cursor, if the cursor is on a pane row (not a group header).
+    #[must_use]
     pub fn selected_pane(&self) -> Option<&TreePane> {
         let mut pos = 0;
         for group in &self.groups {
@@ -91,6 +92,7 @@ impl TreeState {
     }
 
     /// Convenience: get the pane_id of the selected pane.
+    #[must_use]
     pub fn selected_pane_id(&self) -> Option<&str> {
         self.selected_pane().map(|p| p.pane_info.pane_id.as_str())
     }
@@ -129,6 +131,7 @@ impl TreeState {
     }
 
     /// Total number of visible rows (group headers + expanded pane rows).
+    #[must_use]
     pub fn visible_count(&self) -> usize {
         let mut count = 0;
         for group in &self.groups {
@@ -343,7 +346,7 @@ fn shorten_path(path: &std::path::Path) -> String {
 
     // Keep last 2 full, shorten the rest to first char
     let keep_full = 2;
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts: Vec<String> = Vec::with_capacity(components.len());
     for (i, comp) in components.iter().enumerate() {
         if i < components.len().saturating_sub(keep_full) {
             parts.push(comp.chars().next().unwrap_or('.').to_string());
@@ -381,17 +384,7 @@ fn build_groups(
         let agent = detect_agent_in_pane(pane, agent_states);
 
         let tree_pane = TreePane {
-            pane_info: PaneInfo {
-                pane_id: pane.pane_id.clone(),
-                session_name: pane.session_name.clone(),
-                window_index: pane.window_index,
-                window_name: pane.window_name.clone(),
-                current_path: pane.current_path.clone(),
-                current_command: pane.current_command.clone(),
-                start_command: pane.start_command.clone(),
-                pid: pane.pid,
-                activity: pane.activity,
-            },
+            pane_info: pane.clone(),
             agent,
         };
 

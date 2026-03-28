@@ -6,7 +6,7 @@ use crate::error::GroveError;
 use crate::recents::{self, RecentEntry};
 use crate::tmux;
 
-use super::source;
+use super::source::{self, DiffState};
 use super::tree::TreeState;
 
 const TREE_POLL: Duration = Duration::from_secs(5);
@@ -35,6 +35,7 @@ pub(crate) struct App {
     pub open_prompt_dir: Option<String>,
     pub preview_scroll_up: u16,
     pub diff_mode: bool,
+    pub diff_state: Option<DiffState>,
     pub default_agent_command: String,
     pub sidebar_focus: SidebarFocus,
     pub recents: Vec<RecentEntry>,
@@ -76,6 +77,7 @@ impl App {
             open_prompt_dir: None,
             preview_scroll_up: 0,
             diff_mode: false,
+            diff_state: None,
             default_agent_command,
             sidebar_focus: SidebarFocus::Tree,
             recents: recents::load(),
@@ -118,7 +120,13 @@ impl App {
                 });
             if let Some(path) = dir {
                 match source::fetch_git_diffs(&path) {
-                    Ok(content) => self.preview_content = content,
+                    Ok(repos) => {
+                        if let Some(ref mut ds) = self.diff_state {
+                            ds.update(repos);
+                        } else {
+                            self.diff_state = Some(DiffState::new(repos));
+                        }
+                    }
                     Err(e) => self.status_message = Some(format!("Git diff error: {e}")),
                 }
             }

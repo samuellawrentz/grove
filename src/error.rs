@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 #[allow(dead_code)]
+#[non_exhaustive]
 pub enum GroveError {
     #[error("{0}")]
     General(String),
@@ -26,6 +27,7 @@ pub enum GroveError {
 }
 
 impl GroveError {
+    #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
             GroveError::General(_) => 1,
@@ -38,6 +40,7 @@ impl GroveError {
         }
     }
 
+    #[must_use]
     pub fn variant_name(&self) -> &'static str {
         match self {
             GroveError::General(_) => "general",
@@ -50,6 +53,7 @@ impl GroveError {
         }
     }
 
+    #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": false,
