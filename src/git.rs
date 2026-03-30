@@ -44,6 +44,27 @@ pub fn run_git(args: &[&str], cwd: Option<&Path>, verbose: bool) -> Result<Strin
     }
 }
 
+/// Ensure the fetch refspec is configured for a bare repo.
+fn ensure_fetch_refspec(bare_path: &Path, verbose: bool) -> Result<(), GroveError> {
+    let refspec = run_git(
+        &["config", "--get", "remote.origin.fetch"],
+        Some(bare_path),
+        verbose,
+    );
+    if refspec.is_err() || refspec.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        run_git(
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            Some(bare_path),
+            verbose,
+        )?;
+    }
+    Ok(())
+}
+
 /// Clone a bare repository. Returns the default branch name.
 pub fn bare_clone(url: &str, target_path: &Path, verbose: bool) -> Result<String, GroveError> {
     let target_str = target_path
@@ -51,6 +72,12 @@ pub fn bare_clone(url: &str, target_path: &Path, verbose: bool) -> Result<String
         .ok_or_else(|| GroveError::General("invalid path".to_string()))?;
 
     run_git(&["clone", "--bare", url, target_str], None, verbose)?;
+
+    // Configure fetch refspec so `git fetch` populates refs/remotes/origin/*
+    ensure_fetch_refspec(target_path, verbose)?;
+
+    // Initial fetch to populate remote tracking refs
+    run_git(&["fetch", "origin"], Some(target_path), verbose)?;
 
     // Detect default branch via symbolic-ref
     let output = run_git(&["symbolic-ref", "HEAD"], Some(target_path), verbose)?;
@@ -65,7 +92,11 @@ pub fn bare_clone(url: &str, target_path: &Path, verbose: bool) -> Result<String
 }
 
 /// Fetch all remotes for a bare repo. Optionally prune.
+/// Ensures the fetch refspec is configured (repairs bare repos created before this fix).
 pub fn fetch_repo(bare_path: &Path, prune: bool, verbose: bool) -> Result<(), GroveError> {
+    // Ensure fetch refspec exists (self-healing for pre-fix bare repos)
+    ensure_fetch_refspec(bare_path, verbose)?;
+
     let mut args = vec!["fetch", "--all"];
     if prune {
         args.push("--prune");
@@ -105,6 +136,7 @@ pub fn update_default_branch(
 
 /// Create a worktree from a bare repo.
 /// Runs `git worktree add -b <branch> <worktree_path> <base_branch>`.
+/// Sets upstream tracking to origin/<base_branch>.
 pub fn create_worktree(
     bare_path: &Path,
     worktree_path: &Path,
@@ -121,6 +153,15 @@ pub fn create_worktree(
         Some(bare_path),
         verbose,
     )?;
+
+    // Set upstream tracking so `git pull` works in the worktree
+    let remote_branch = format!("origin/{base_branch}");
+    let _ = run_git(
+        &["branch", "--set-upstream-to", &remote_branch, branch],
+        Some(bare_path),
+        verbose,
+    );
+
     Ok(())
 }
 

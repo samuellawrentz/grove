@@ -13,6 +13,8 @@ pub struct GitConfig {
     pub merge_no_ff: bool,
     #[serde(default = "default_clone_retries")]
     pub clone_retries: u32,
+    #[serde(default = "default_tracked_branches")]
+    pub tracked_branches: Vec<String>,
 }
 
 impl Default for GitConfig {
@@ -21,6 +23,7 @@ impl Default for GitConfig {
             fetch_prune: default_fetch_prune(),
             merge_no_ff: default_merge_no_ff(),
             clone_retries: default_clone_retries(),
+            tracked_branches: default_tracked_branches(),
         }
     }
 }
@@ -33,6 +36,9 @@ fn default_merge_no_ff() -> bool {
 }
 fn default_clone_retries() -> u32 {
     3
+}
+fn default_tracked_branches() -> Vec<String> {
+    vec!["main".to_string(), "dev".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

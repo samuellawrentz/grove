@@ -76,6 +76,7 @@ pub fn run(
     };
 
     let prune = config.git.fetch_prune;
+    let tracked_branches = config.git.tracked_branches.clone();
     let max_parallel = config.max_parallel_syncs;
     let results = Arc::new(Mutex::new(Vec::new()));
     let semaphore = Arc::new(Semaphore::new(max_parallel));
@@ -87,13 +88,22 @@ pub fn run(
             let name = name.clone();
             let path = path.clone();
             let default_branch = default_branch.clone();
+            let tracked_branches = tracked_branches.clone();
             s.spawn(move || {
                 sem.acquire();
                 if !json_mode {
                     eprintln!("Syncing {}...", name);
                 }
-                let result = git::fetch_repo(&path, prune, verbose)
-                    .and_then(|()| git::update_default_branch(&path, &default_branch, verbose));
+                let result = git::fetch_repo(&path, prune, verbose).and_then(|()| {
+                    for branch in &tracked_branches {
+                        git::update_default_branch(&path, branch, verbose)?;
+                    }
+                    // Always include the repo's default branch
+                    if !tracked_branches.iter().any(|b| b == &default_branch) {
+                        git::update_default_branch(&path, &default_branch, verbose)?;
+                    }
+                    Ok(())
+                });
                 let sync_result = match result {
                     Ok(()) => SyncResult {
                         repo: name.clone(),
@@ -112,7 +122,10 @@ pub fn run(
         }
     });
 
-    let results = Arc::try_unwrap(results).expect("arc still shared").into_inner().expect("mutex poisoned");
+    let results = Arc::try_unwrap(results)
+        .expect("arc still shared")
+        .into_inner()
+        .expect("mutex poisoned");
 
     // Update last_synced_at for successful repos
     let now = Utc::now();
