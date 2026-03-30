@@ -86,6 +86,7 @@ impl Db {
         std::fs::create_dir_all(&dir)?;
         let db = Self::open_path(&dir.join("grove.db"))?;
         let _ = db.migrate_recents(&dir);
+        let _ = db.migrate_state_json(&dir);
         Ok(db)
     }
 
@@ -191,6 +192,83 @@ impl Db {
         }
         let migrated = grove_dir.join("recents.json.migrated");
         let _ = std::fs::rename(&recents_path, &migrated);
+        Ok(count)
+    }
+
+    /// One-time migration: import repos and tasks from legacy state.json into sqlite.
+    pub fn migrate_state_json(&self, grove_dir: &Path) -> Result<usize, GroveError> {
+        let state_path = grove_dir.join("state.json");
+        if !state_path.exists() {
+            return Ok(0);
+        }
+        let data = std::fs::read_to_string(&state_path)?;
+        let state: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+        let mut count = 0;
+
+        // Migrate repos
+        if let Some(repos) = state["repos"].as_object() {
+            for (_key, repo) in repos {
+                let entry = RepoEntry {
+                    name: repo["name"].as_str().unwrap_or_default().to_string(),
+                    url: repo["url"].as_str().unwrap_or_default().to_string(),
+                    path: PathBuf::from(repo["path"].as_str().unwrap_or_default()),
+                    default_branch: repo["default_branch"].as_str().unwrap_or("main").to_string(),
+                    registered_at: repo["registered_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    last_synced_at: repo["last_synced_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.with_timezone(&Utc)),
+                };
+                if !entry.name.is_empty() {
+                    let _ = self.upsert_repo(&entry);
+                    count += 1;
+                }
+            }
+        }
+
+        // Migrate tasks
+        if let Some(tasks) = state["tasks"].as_object() {
+            for (_key, task) in tasks {
+                let repos: Vec<TaskRepo> = task["repos"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|tr| {
+                                Some(TaskRepo {
+                                    repo_name: tr["repo_name"].as_str()?.to_string(),
+                                    worktree_path: PathBuf::from(tr["worktree_path"].as_str()?),
+                                    branch: tr["branch"].as_str()?.to_string(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let entry = TaskEntry {
+                    id: task["id"].as_str().unwrap_or_default().to_string(),
+                    path: PathBuf::from(task["path"].as_str().unwrap_or_default()),
+                    repos,
+                    created_at: task["created_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    tmux_window: task["tmux_window"].as_str().map(String::from),
+                    pane_id: task["pane_id"].as_str().map(String::from),
+                };
+                if !entry.id.is_empty() {
+                    let _ = self.upsert_task(&entry);
+                    count += 1;
+                }
+            }
+        }
+
+        let migrated = grove_dir.join("state.json.migrated");
+        let _ = std::fs::rename(&state_path, &migrated);
         Ok(count)
     }
 
