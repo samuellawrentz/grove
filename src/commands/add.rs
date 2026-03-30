@@ -1,7 +1,7 @@
+use crate::db::{Db, TaskRepo};
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
-use crate::state::{GroveState, TaskRepo};
 use crate::validation::validate_identifier;
 
 #[allow(clippy::too_many_arguments)]
@@ -11,16 +11,14 @@ pub fn run(
     branch: Option<&str>,
     base: Option<&str>,
     _config: &crate::config::GroveConfig,
-    state: &mut GroveState,
+    db: &Db,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
     validate_identifier(repo_name, "repo")?;
 
-    // Extract needed data from borrows before mutable access
-    let task = state
-        .tasks
-        .get(task_id)
+    let mut task = db
+        .get_task(task_id)?
         .ok_or_else(|| GroveError::TaskNotFound(task_id.to_string()))?;
 
     let already_in_task = task.repos.iter().any(|r| r.repo_name == repo_name);
@@ -36,9 +34,8 @@ pub fn run(
         .unwrap_or_else(|| task_id.to_string());
     let worktree_path = task.path.join(repo_name);
 
-    let repo_entry = state
-        .repos
-        .get(repo_name)
+    let repo_entry = db
+        .get_repo(repo_name)?
         .ok_or_else(|| GroveError::RepoNotRegistered(repo_name.to_string()))?;
 
     let bare_path = repo_entry.path.clone();
@@ -54,17 +51,12 @@ pub fn run(
         verbose,
     )?;
 
-    // Add to task state
-    let task_mut = state
-        .tasks
-        .get_mut(task_id)
-        .expect("task confirmed to exist above");
-    task_mut.repos.push(TaskRepo {
+    task.repos.push(TaskRepo {
         repo_name: repo_name.to_string(),
         worktree_path: worktree_path.clone(),
         branch: branch_name.clone(),
     });
-    state.save()?;
+    db.upsert_task(&task)?;
 
     let data = serde_json::json!({
         "task_id": task_id,

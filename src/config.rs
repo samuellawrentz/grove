@@ -220,10 +220,6 @@ pub fn grove_dir() -> PathBuf {
         .join(".grove")
 }
 
-pub fn state_path() -> PathBuf {
-    grove_dir().join("state.json")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

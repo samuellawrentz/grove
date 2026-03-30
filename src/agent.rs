@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::GroveError;
-use crate::state::TaskEntry;
+use crate::db::TaskEntry;
 use crate::tmux::{self, PaneInfo};
 
 const STATE_FILE: &str = "/tmp/claude-panes.json";

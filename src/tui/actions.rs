@@ -417,6 +417,11 @@ fn selected_target_cwd(app: &App) -> Option<(String, String)> {
             let target = first_pane.pane_info.pane_id.clone();
             (target, cwd)
         })
+    } else if app.sidebar_focus == SidebarFocus::Projects {
+        app.projects.get(app.projects_cursor).map(|proj| {
+            let path = proj.path.to_string_lossy().to_string();
+            ("new-window".to_string(), path)
+        })
     } else {
         None
     }

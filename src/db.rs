@@ -2,8 +2,47 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::GroveError;
-use crate::state::{RepoEntry, TaskEntry, TaskRepo};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoEntry {
+    pub name: String,
+    pub url: String,
+    pub path: PathBuf,
+    pub default_branch: String,
+    pub registered_at: DateTime<Utc>,
+    pub last_synced_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRepo {
+    pub repo_name: String,
+    pub worktree_path: PathBuf,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEntry {
+    pub id: String,
+    pub path: PathBuf,
+    pub repos: Vec<TaskRepo>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+impl TaskEntry {
+    pub fn is_stale(&self) -> bool {
+        if !self.path.exists() {
+            return true;
+        }
+        self.repos.iter().any(|r| !r.worktree_path.exists())
+    }
+}
 
 pub struct Db {
     conn: rusqlite::Connection,
@@ -216,7 +255,7 @@ impl Db {
             "SELECT name, url, path, default_branch, registered_at, last_synced_at \
              FROM repos ORDER BY name",
         )?;
-        let rows = stmt.query_map([], |row| row_to_repo_entry(row))?;
+        let rows = stmt.query_map([], row_to_repo_entry)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| GroveError::Database(e.to_string()))
     }

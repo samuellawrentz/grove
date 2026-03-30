@@ -249,8 +249,8 @@ pub fn new_window(cwd: &str, cmd: Option<&str>, verbose: bool) -> Result<String,
     run_tmux(&args, verbose)
 }
 
-/// Register tmux hooks to record new windows/panes in grove recents.
-pub fn register_recents_hooks(verbose: bool) {
+/// Register tmux hooks to record new windows/panes as grove projects.
+pub fn register_project_hooks(verbose: bool) {
     let grove_bin = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "grove".to_string());
@@ -262,7 +262,7 @@ pub fn register_recents_hooks(verbose: bool) {
     ];
 
     for event in &events {
-        let cmd = format!("run-shell -b '{grove_bin} recents-add #{{pane_current_path}}'");
+        let cmd = format!("run-shell -b '{grove_bin} project-touch #{{pane_current_path}}'");
         let _ = run_tmux(&["set-hook", "-g", event, &cmd], verbose);
     }
 }
