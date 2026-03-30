@@ -183,8 +183,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.tree.agent_filter = match &app.tree.agent_filter {
+                AgentFilter::All => AgentFilter::AnyAgent,
                 AgentFilter::AnyAgent => AgentFilter::All,
-                _ => AgentFilter::AnyAgent,
             };
             app.tree.jump_first_pane();
             update_scroll(app);

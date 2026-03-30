@@ -157,8 +157,6 @@ impl TreeState {
             match &self.agent_filter {
                 AgentFilter::All => true,
                 AgentFilter::AnyAgent => pane.agent.is_some(),
-                AgentFilter::Specific(kind) => pane.agent.as_ref().is_some_and(|a| a.kind == *kind),
-                AgentFilter::NonAgent => pane.agent.is_none(),
             }
         };
         search_ok && agent_ok

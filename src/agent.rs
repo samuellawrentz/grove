@@ -58,8 +58,6 @@ impl fmt::Display for AgentState {
 pub enum AgentFilter {
     All,
     AnyAgent,
-    Specific(AgentKind),
-    NonAgent,
 }
 
 #[derive(Debug, Clone)]
@@ -85,14 +83,14 @@ pub struct AgentDef {
     pub kind: AgentKind,
     pub command_names: &'static [&'static str],
     pub detect: DetectStrategy,
-    pub icon_active: &'static str,
-    pub icon_waiting: &'static str,
-    pub icon_not_running: &'static str,
+    pub icon: &'static str,
     pub accept_keys: &'static [&'static str],
     pub reject_keys: &'static [&'static str],
     pub default_command: &'static str,
     pub display_name: &'static str,
 }
+
+pub const TERMINAL_ICON: &str = "󰆍";
 
 pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
     vec![
@@ -100,9 +98,7 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
             kind: AgentKind::Claude,
             command_names: &["claude"],
             detect: DetectStrategy::StateFile { path: "/tmp/claude-panes.json" },
-            icon_active: "●",
-            icon_waiting: "◉",
-            icon_not_running: "○",
+            icon: "󰚩",
             accept_keys: &["Enter"],
             reject_keys: &["n", "Enter"],
             default_command: "claude --dangerously-skip-permissions",
@@ -116,9 +112,7 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
                 waiting_re: Some(Regex::new(r"(?i)(>\s*$|waiting for input|idle)").unwrap()),
                 approval_re: Regex::new(r"(?i)(approve|deny|allow|reject|\[y/n\]|\[yes/no\])").unwrap(),
             },
-            icon_active: "●",
-            icon_waiting: "◉",
-            icon_not_running: "○",
+            icon: "󰘦",
             accept_keys: &["y", "Enter"],
             reject_keys: &["n", "Enter"],
             default_command: "opencode",
@@ -132,9 +126,7 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
                 waiting_re: Some(Regex::new(r"(?i)(>\s*$)").unwrap()),
                 approval_re: Regex::new(r"(?i)(Would you like to run|Would you like to make|Allow Codex to|Approve app tool call|Do you trust the contents|Enable full access)").unwrap(),
             },
-            icon_active: "●",
-            icon_waiting: "◉",
-            icon_not_running: "○",
+            icon: "󰅪",
             accept_keys: &["y", "Enter"],
             reject_keys: &["n", "Enter"],
             default_command: "codex",
@@ -148,9 +140,7 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
                 waiting_re: Some(Regex::new(r"(?i)(>\s*$|waiting)").unwrap()),
                 approval_re: Regex::new(r"(?i)(\[y/n\]|\[yes/no\]|confirm|approve)").unwrap(),
             },
-            icon_active: "●",
-            icon_waiting: "◉",
-            icon_not_running: "○",
+            icon: "󰆍",
             accept_keys: &["Enter"],
             reject_keys: &["n", "Enter"],
             default_command: "cursor",

@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::app::{App, SidebarFocus};
-use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
+use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY, TERMINAL_ICON};
 use crate::recents;
 
 /// Draw the TUI frame.
@@ -42,15 +42,6 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let pane_title = match &app.tree.agent_filter {
         AgentFilter::All => " Panes [all] ".to_string(),
         AgentFilter::AnyAgent => " Panes [agents] ".to_string(),
-        AgentFilter::Specific(kind) => {
-            let name = AGENT_REGISTRY
-                .iter()
-                .find(|d| d.kind == *kind)
-                .map(|d| d.display_name)
-                .unwrap_or("?");
-            format!(" Panes [{name}] ")
-        }
-        AgentFilter::NonAgent => " Panes [other] ".to_string(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -96,17 +87,18 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
         if group.expanded {
             for pane in &group.panes {
-                let icon = match &pane.agent {
+                let (icon, icon_color) = match &pane.agent {
                     Some(info) => {
                         let def = AGENT_REGISTRY.iter().find(|d| d.kind == info.kind);
-                        match (&info.state, def) {
-                            (AgentState::Active, Some(d)) => d.icon_active,
-                            (AgentState::Waiting, Some(d)) => d.icon_waiting,
-                            (AgentState::NotRunning, Some(d)) => d.icon_not_running,
-                            _ => "○",
-                        }
+                        let icon = def.map(|d| d.icon).unwrap_or(TERMINAL_ICON);
+                        let color = match info.state {
+                            AgentState::Active => Color::Green,
+                            AgentState::Waiting => Color::Yellow,
+                            AgentState::NotRunning => Color::DarkGray,
+                        };
+                        (icon, color)
                     }
-                    None => "·",
+                    None => (TERMINAL_ICON, Color::DarkGray),
                 };
 
                 let basename = pane
@@ -115,7 +107,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(".");
-                let label = format!("  {icon} {} [{}]", basename, pane.pane_info.current_command,);
+                let label = format!("  {} [{}]", basename, pane.pane_info.current_command);
 
                 let matches = app.tree.pane_matches(pane, &group.name);
                 let style = if focused && row_idx == app.tree.cursor {
@@ -125,7 +117,17 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 } else {
                     Style::default()
                 };
-                lines.push(Line::from(Span::styled(label, style)));
+                let icon_style = if focused && row_idx == app.tree.cursor {
+                    Style::default().fg(icon_color).bg(Color::DarkGray)
+                } else if !matches {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(icon_color)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {icon} "), icon_style),
+                    Span::styled(label, style),
+                ]));
                 row_idx += 1;
             }
         }
@@ -227,15 +229,6 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let filter_label = match &app.tree.agent_filter {
         AgentFilter::All => " [all] ".to_string(),
         AgentFilter::AnyAgent => " [agents] ".to_string(),
-        AgentFilter::Specific(kind) => {
-            let name = AGENT_REGISTRY
-                .iter()
-                .find(|d| d.kind == *kind)
-                .map(|d| d.display_name)
-                .unwrap_or("?");
-            format!(" [{name}] ")
-        }
-        AgentFilter::NonAgent => " [other] ".to_string(),
     };
     let title = if app.diff_mode {
         " Git Diff ".to_string()
