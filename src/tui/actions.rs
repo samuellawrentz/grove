@@ -1,6 +1,6 @@
 use crossterm::event::KeyEvent;
 
-use crate::agent::{AgentFilter, AgentKind, AgentState, AGENT_REGISTRY};
+use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
 use crate::{recents, tmux};
 
 use super::app::{App, SidebarFocus};
@@ -183,17 +183,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.tree.agent_filter = match &app.tree.agent_filter {
-                AgentFilter::All => AgentFilter::AnyAgent,
-                AgentFilter::AnyAgent => AgentFilter::Specific(AgentKind::Claude),
-                AgentFilter::Specific(AgentKind::Claude) => {
-                    AgentFilter::Specific(AgentKind::OpenCode)
-                }
-                AgentFilter::Specific(AgentKind::OpenCode) => {
-                    AgentFilter::Specific(AgentKind::Codex)
-                }
-                AgentFilter::Specific(AgentKind::Codex) => AgentFilter::Specific(AgentKind::Cursor),
-                AgentFilter::Specific(AgentKind::Cursor) => AgentFilter::NonAgent,
-                AgentFilter::NonAgent => AgentFilter::All,
+                AgentFilter::AnyAgent => AgentFilter::All,
+                _ => AgentFilter::AnyAgent,
             };
             app.tree.jump_first_pane();
             update_scroll(app);

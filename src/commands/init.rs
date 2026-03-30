@@ -168,7 +168,9 @@ pub fn run(
 
     let create_result = (|| -> Result<(), GroveError> {
         for repo_name in &resolved_repos {
-            let repo_entry = state.repos.get(repo_name.as_str())
+            let repo_entry = state
+                .repos
+                .get(repo_name.as_str())
                 .ok_or_else(|| GroveError::RepoNotRegistered(repo_name.clone()))?;
             let bare_path = &repo_entry.path;
             let base_branch = opts.base.unwrap_or(&repo_entry.default_branch);
