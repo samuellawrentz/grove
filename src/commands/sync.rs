@@ -129,10 +129,7 @@ pub fn run(
     let now = Utc::now();
     for r in &results {
         if r.ok {
-            if let Some(mut entry) = db.get_repo(&r.repo)? {
-                entry.last_synced_at = Some(now);
-                db.upsert_repo(&entry)?;
-            }
+            db.touch_repo_synced(&r.repo, now)?;
         }
     }
 

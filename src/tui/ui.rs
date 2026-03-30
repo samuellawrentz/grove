@@ -16,7 +16,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     let panels = Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
         .split(outer[0]);
 
-    // Split sidebar into tree (top) and recents (bottom)
+    // Split sidebar into tree (top) and projects (bottom)
     let sidebar =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(panels[0]);
 

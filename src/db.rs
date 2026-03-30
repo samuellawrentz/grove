@@ -56,7 +56,7 @@ pub struct Project {
     pub last_seen: String,
 }
 
-const DT_FMT: &str = "%Y-%m-%d %H:%M:%S";
+pub(crate) const DT_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
 fn dt_to_str(dt: DateTime<Utc>) -> String {
     dt.format(DT_FMT).to_string()
@@ -68,11 +68,21 @@ fn str_to_dt(s: &str) -> Option<DateTime<Utc>> {
         .map(|d| d.and_utc())
 }
 
+fn canonical_path_and_name(path: &str) -> (String, String) {
+    let canonical = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .to_string();
+    let name = Path::new(&canonical)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| canonical.clone());
+    (canonical, name)
+}
+
 impl Db {
     pub fn open() -> Result<Self, GroveError> {
-        let dir = dirs::home_dir()
-            .ok_or_else(|| GroveError::General("no home directory".into()))?
-            .join(".grove");
+        let dir = crate::config::grove_dir();
         std::fs::create_dir_all(&dir)?;
         let db = Self::open_path(&dir.join("grove.db"))?;
         let _ = db.migrate_recents(&dir);
@@ -104,25 +114,13 @@ impl Db {
     // ── Projects ─────────────────────────────────────────────────────────────
 
     pub fn upsert_project(&self, path: &str) -> Result<i64, GroveError> {
-        let canonical = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| PathBuf::from(path))
-            .to_string_lossy()
-            .to_string();
-        let name = Path::new(&canonical)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| canonical.clone());
+        let (canonical, name) = canonical_path_and_name(path);
         self.conn.execute(
             "INSERT INTO projects (path, name) VALUES (?1, ?2)
              ON CONFLICT(path) DO UPDATE SET last_seen = datetime('now')",
             rusqlite::params![canonical, name],
         )?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM projects WHERE path = ?1",
-            [&canonical],
-            |r| r.get(0),
-        )?;
-        Ok(id)
+        Ok(self.conn.last_insert_rowid())
     }
 
     pub fn upsert_project_with_timestamp(
@@ -130,14 +128,7 @@ impl Db {
         path: &str,
         timestamp: u64,
     ) -> Result<i64, GroveError> {
-        let canonical = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| PathBuf::from(path))
-            .to_string_lossy()
-            .to_string();
-        let name = Path::new(&canonical)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| canonical.clone());
+        let (canonical, name) = canonical_path_and_name(path);
         let dt = chrono::DateTime::from_timestamp(timestamp as i64, 0)
             .map(|d| d.format(DT_FMT).to_string())
             .unwrap_or_else(|| chrono::Utc::now().format(DT_FMT).to_string());
@@ -146,12 +137,7 @@ impl Db {
              ON CONFLICT(path) DO UPDATE SET last_seen = MAX(last_seen, ?3)",
             rusqlite::params![canonical, name, dt],
         )?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM projects WHERE path = ?1",
-            [&canonical],
-            |r| r.get(0),
-        )?;
-        Ok(id)
+        Ok(self.conn.last_insert_rowid())
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>, GroveError> {
@@ -181,10 +167,7 @@ impl Db {
     }
 
     pub fn delete_project(&self, path: &str) -> Result<(), GroveError> {
-        let canonical = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| PathBuf::from(path))
-            .to_string_lossy()
-            .to_string();
+        let (canonical, _) = canonical_path_and_name(path);
         self.conn
             .execute("DELETE FROM projects WHERE path = ?1", [&canonical])?;
         Ok(())
@@ -260,6 +243,14 @@ impl Db {
             .map_err(|e| GroveError::Database(e.to_string()))
     }
 
+    pub fn touch_repo_synced(&self, name: &str, at: DateTime<Utc>) -> Result<(), GroveError> {
+        self.conn.execute(
+            "UPDATE repos SET last_synced_at = ?1 WHERE name = ?2",
+            rusqlite::params![dt_to_str(at), name],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_repo(&self, name: &str) -> Result<(), GroveError> {
         self.conn
             .execute("DELETE FROM repos WHERE name = ?1", [name])?;
@@ -269,37 +260,34 @@ impl Db {
     // ── Tasks ─────────────────────────────────────────────────────────────────
 
     pub fn upsert_task(&self, task: &TaskEntry) -> Result<(), GroveError> {
-        let path = task.path.to_string_lossy().to_string();
-        let created_at = dt_to_str(task.created_at);
-        self.conn.execute(
-            "INSERT INTO tasks (id, path, created_at, tmux_window, pane_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-               path        = excluded.path,
-               tmux_window = excluded.tmux_window,
-               pane_id     = excluded.pane_id",
-            rusqlite::params![
-                task.id,
-                path,
-                created_at,
-                task.tmux_window,
-                task.pane_id,
-            ],
-        )?;
-        // Replace task_repos
-        self.conn.execute(
-            "DELETE FROM task_repos WHERE task_id = ?1",
-            [&task.id],
-        )?;
-        for tr in &task.repos {
-            let worktree = tr.worktree_path.to_string_lossy().to_string();
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<(), GroveError> {
+            let path = task.path.to_string_lossy().to_string();
+            let created_at = dt_to_str(task.created_at);
             self.conn.execute(
-                "INSERT INTO task_repos (task_id, repo_name, worktree, branch) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![task.id, tr.repo_name, worktree, tr.branch],
+                "INSERT INTO tasks (id, path, created_at, tmux_window, pane_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                   path        = excluded.path,
+                   tmux_window = excluded.tmux_window,
+                   pane_id     = excluded.pane_id",
+                rusqlite::params![task.id, path, created_at, task.tmux_window, task.pane_id],
             )?;
+            self.conn.execute("DELETE FROM task_repos WHERE task_id = ?1", [&task.id])?;
+            for tr in &task.repos {
+                let worktree = tr.worktree_path.to_string_lossy().to_string();
+                self.conn.execute(
+                    "INSERT INTO task_repos (task_id, repo_name, worktree, branch) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![task.id, tr.repo_name, worktree, tr.branch],
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => { self.conn.execute_batch("COMMIT")?; Ok(()) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
         }
-        Ok(())
     }
 
     pub fn get_task(&self, id: &str) -> Result<Option<TaskEntry>, GroveError> {
@@ -308,8 +296,14 @@ impl Db {
         )?;
         let mut rows = stmt.query([id])?;
         if let Some(row) = rows.next()? {
-            let task = row_to_task_entry(row, &self.conn)?;
-            Ok(Some(task))
+            let id: String = row.get(0)?;
+            let path: String = row.get(1)?;
+            let created_at_str: String = row.get(2)?;
+            let tmux_window: Option<String> = row.get(3)?;
+            let pane_id: Option<String> = row.get(4)?;
+            let created_at = str_to_dt(&created_at_str).unwrap_or_else(Utc::now);
+            let repos = self.load_task_repos(&id)?;
+            Ok(Some(TaskEntry { id, path: PathBuf::from(path), created_at, tmux_window, pane_id, repos }))
         } else {
             Ok(None)
         }
@@ -387,42 +381,6 @@ fn row_to_repo_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoEntry> {
         default_branch: row.get(3)?,
         registered_at,
         last_synced_at,
-    })
-}
-
-fn row_to_task_entry(
-    row: &rusqlite::Row<'_>,
-    conn: &rusqlite::Connection,
-) -> Result<TaskEntry, GroveError> {
-    let id: String = row.get(0)?;
-    let path: String = row.get(1)?;
-    let created_at_str: String = row.get(2)?;
-    let tmux_window: Option<String> = row.get(3)?;
-    let pane_id: Option<String> = row.get(4)?;
-
-    let created_at = str_to_dt(&created_at_str).unwrap_or_else(Utc::now);
-
-    let mut stmt = conn.prepare(
-        "SELECT repo_name, worktree, branch FROM task_repos WHERE task_id = ?1",
-    )?;
-    let repos = stmt
-        .query_map([&id], |r| {
-            Ok(TaskRepo {
-                repo_name: r.get(0)?,
-                worktree_path: PathBuf::from(r.get::<_, String>(1)?),
-                branch: r.get(2)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| GroveError::Database(e.to_string()))?;
-
-    Ok(TaskEntry {
-        id,
-        path: PathBuf::from(path),
-        created_at,
-        tmux_window,
-        pane_id,
-        repos,
     })
 }
 

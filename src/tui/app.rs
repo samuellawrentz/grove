@@ -102,10 +102,14 @@ impl App {
             source::fetch_agent_states(),
         ) {
             (Ok(panes), Ok(states)) => {
+                let old_group_count = self.tree.groups.len();
                 self.tree.rebuild(&panes, &states, "");
                 self.status_message = None;
-                for group in &self.tree.groups {
-                    let _ = self.db.upsert_project(&group.path.to_string_lossy());
+                // Only upsert projects when groups change (avoids writes every 5s tick)
+                if self.tree.groups.len() != old_group_count {
+                    for group in &self.tree.groups {
+                        let _ = self.db.upsert_project(&group.path.to_string_lossy());
+                    }
                 }
             }
             (Err(e), _) | (_, Err(e)) => {
