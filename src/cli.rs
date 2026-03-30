@@ -126,6 +126,13 @@ pub enum Commands {
         dir: String,
     },
 
+    /// Register a directory path as a project (used by tmux hooks)
+    #[clap(hide = true)]
+    ProjectTouch {
+        /// Directory path to register as project
+        path: String,
+    },
+
     /// Add a repo to an existing task
     Add {
         /// Task identifier

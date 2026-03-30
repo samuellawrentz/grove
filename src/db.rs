@@ -35,7 +35,9 @@ impl Db {
             .ok_or_else(|| GroveError::General("no home directory".into()))?
             .join(".grove");
         std::fs::create_dir_all(&dir)?;
-        Self::open_path(&dir.join("grove.db"))
+        let db = Self::open_path(&dir.join("grove.db"))?;
+        let _ = db.migrate_recents(&dir);
+        Ok(db)
     }
 
     pub fn open_path(path: &Path) -> Result<Self, GroveError> {
@@ -147,6 +149,27 @@ impl Db {
         self.conn
             .execute("DELETE FROM projects WHERE path = ?1", [&canonical])?;
         Ok(())
+    }
+
+    pub fn migrate_recents(&self, grove_dir: &Path) -> Result<usize, GroveError> {
+        let recents_path = grove_dir.join("recents.json");
+        if !recents_path.exists() {
+            return Ok(0);
+        }
+        let data = std::fs::read_to_string(&recents_path)?;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        let mut count = 0;
+        for entry in &entries {
+            if let (Some(path), Some(timestamp)) =
+                (entry["path"].as_str(), entry["timestamp"].as_u64())
+            {
+                self.upsert_project_with_timestamp(path, timestamp)?;
+                count += 1;
+            }
+        }
+        let migrated = grove_dir.join("recents.json.migrated");
+        let _ = std::fs::rename(&recents_path, &migrated);
+        Ok(count)
     }
 
     // ── Repos ─────────────────────────────────────────────────────────────────

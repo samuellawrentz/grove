@@ -6,7 +6,6 @@ use ratatui::Frame;
 
 use super::app::{App, SidebarFocus};
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY, TERMINAL_ICON};
-use crate::recents;
 
 /// Draw the TUI frame.
 pub(crate) fn draw(f: &mut Frame, app: &App) {
@@ -22,7 +21,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(panels[0]);
 
     draw_tree(f, app, sidebar[0]);
-    draw_recents(f, app, sidebar[1]);
+    draw_projects(f, app, sidebar[1]);
     draw_preview(f, app, panels[1]);
     draw_status_bar(f, app, outer[1]);
 
@@ -147,8 +146,29 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(tree_widget, inner);
 }
 
-fn draw_recents(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let focused = app.sidebar_focus == SidebarFocus::Recents;
+fn format_relative_time(last_seen: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = chrono::NaiveDateTime::parse_from_str(last_seen, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|d| d.and_utc().timestamp() as u64)
+        .unwrap_or(0);
+    let delta = now.saturating_sub(ts);
+    if delta < 60 {
+        "now".to_string()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
+}
+
+fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let focused = app.sidebar_focus == SidebarFocus::Projects;
     let border_color = if focused {
         Color::Cyan
     } else {
@@ -157,58 +177,58 @@ fn draw_recents(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(" Recents ");
+        .title(" Projects ");
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.recents.is_empty() {
-        let empty = Paragraph::new("No recent sessions")
+    if app.projects.is_empty() {
+        let empty = Paragraph::new("No projects yet")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(ratatui::layout::Alignment::Center);
         f.render_widget(empty, inner);
         return;
     }
 
+    // Collect active project paths from current tree groups
+    let active_paths: std::collections::HashSet<String> = app
+        .tree
+        .groups
+        .iter()
+        .map(|g| g.path.to_string_lossy().to_string())
+        .collect();
+
     let lines: Vec<Line> = app
-        .recents
+        .projects
         .iter()
         .enumerate()
-        .map(|(i, entry)| {
-            let name = entry
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| entry.path.to_string_lossy().to_string());
-            let parent = entry
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string());
-            let time = recents::format_relative_time(entry.timestamp);
-            let selected = focused && i == app.recents_cursor;
+        .map(|(i, project)| {
+            let is_active = active_paths.contains(&project.path.to_string_lossy().to_string());
+            let time = format_relative_time(&project.last_seen);
+            let selected = focused && i == app.projects_cursor;
             let style = if selected {
                 Style::default().bg(Color::DarkGray)
-            } else {
+            } else if is_active {
                 Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
             };
             let dim = if selected {
                 Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let mut spans = vec![Span::styled(format!("  {name}"), style)];
-            if let Some(parent) = parent {
-                spans.push(Span::styled(format!("  {parent}/"), dim));
-            }
+            let short_path = crate::tui::tree::shorten_path(&project.path);
+            let mut spans = vec![Span::styled(format!("  {}", project.name), style)];
+            spans.push(Span::styled(format!("  {short_path}"), dim));
             spans.push(Span::styled(format!("  {time}"), dim));
             Line::from(spans)
         })
         .collect();
 
     let visible_height = inner.height as usize;
-    let start = if app.recents_cursor >= visible_height {
-        app.recents_cursor - visible_height + 1
+    let start = if app.projects_cursor >= visible_height {
+        app.projects_cursor - visible_height + 1
     } else {
         0
     };
@@ -346,8 +366,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 SidebarFocus::Tree => {
                     "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
                 }
-                SidebarFocus::Recents => {
-                    "j/k:nav  C-h/C-l:pane  C-t:filter  d:diff  c/Enter:continue  n:new  t:terminal  o:open  x:remove  q:quit"
+                SidebarFocus::Projects => {
+                    "j/k:nav  C-h/C-l:pane  c/Enter:continue  n:new  t:terminal  x:remove  q:quit"
                 }
             }
         };

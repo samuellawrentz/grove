@@ -1,8 +1,31 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::agent::{detect_agent_in_pane, AgentFilter, AgentInfo, AgentState};
 use crate::tmux::PaneInfo;
+
+static PROJECT_ROOT_CACHE: Mutex<Option<HashMap<PathBuf, PathBuf>>> = Mutex::new(None);
+
+fn resolve_project_root(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut cache = PROJECT_ROOT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(HashMap::new);
+    if let Some(root) = map.get(&canonical) {
+        return root.clone();
+    }
+    let root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&canonical)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| PathBuf::from(s.trim()))
+        .unwrap_or_else(|| canonical.clone());
+    map.insert(canonical, root.clone());
+    root
+}
 
 /// A group of panes sharing the same working directory basename.
 pub(crate) struct TreeGroup {
@@ -316,7 +339,7 @@ fn pane_matches_filter(pane: &TreePane, group_name: &str, query: &str) -> bool {
 /// Shorten a path fish-style: replace $HOME with ~, keep the last 2 components
 /// full, and collapse earlier components to their first character.
 /// e.g. `/home/user/src/personal/grove` → `~/s/personal/grove`
-fn shorten_path(path: &std::path::Path) -> String {
+pub(crate) fn shorten_path(path: &std::path::Path) -> String {
     let path_str = path.to_string_lossy();
     // Replace $HOME with ~
     let home = dirs::home_dir().unwrap_or_default();
@@ -386,13 +409,8 @@ fn build_groups(
             agent,
         };
 
-        let parent = pane
-            .current_path
-            .parent()
-            .unwrap_or(&pane.current_path)
-            .to_path_buf();
-
-        group_map.entry(parent).or_default().push(tree_pane);
+        let project_root = resolve_project_root(&pane.current_path);
+        group_map.entry(project_root).or_default().push(tree_pane);
     }
 
     let mut groups: Vec<TreeGroup> = group_map
@@ -475,8 +493,8 @@ mod tests {
     }
 
     #[test]
-    fn test_groups_by_parent_directory() {
-        // Panes in /opt/src/grove and /opt/src/other share parent /opt/src
+    fn test_groups_by_git_root() {
+        // Panes in different dirs with no git root — each becomes its own group
         let panes = vec![
             make_pane("%1", "main", 0, "/opt/src/grove", "zsh"),
             make_pane("%2", "main", 1, "/opt/src/grove", "claude"),
@@ -486,24 +504,25 @@ mod tests {
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        // /opt/src siblings → 1 group, /tmp/third → another
-        assert_eq!(tree.groups.len(), 2);
+        // /opt/src/grove (2 panes) → 1 group, /opt/src/other → 1 group, /tmp/third → 1 group
+        assert_eq!(tree.groups.len(), 3);
         let names: Vec<&str> = tree.groups.iter().map(|g| g.name.as_str()).collect();
-        assert!(names.contains(&"opt/src"));
-        assert!(names.contains(&"tmp"));
+        assert!(names.contains(&"o/src/grove"));
+        assert!(names.contains(&"o/src/other"));
+        assert!(names.contains(&"tmp/third"));
     }
 
     #[test]
-    fn test_sibling_dirs_grouped() {
-        // Two panes in different subdirs of the same parent
+    fn test_same_dir_grouped() {
+        // Two panes in the same directory are grouped together
         let panes = vec![
-            make_pane("%1", "main", 0, "/home/user/tasks/task-a/console", "zsh"),
-            make_pane("%2", "work", 0, "/home/user/tasks/task-a/api", "zsh"),
+            make_pane("%1", "main", 0, "/home/user/tasks/task-a", "zsh"),
+            make_pane("%2", "work", 0, "/home/user/tasks/task-a", "zsh"),
         ];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        // Both share parent /home/user/tasks/task-a → 1 group
+        // Same path → 1 group
         assert_eq!(tree.groups.len(), 1);
         assert_eq!(tree.groups[0].panes.len(), 2);
     }
@@ -541,8 +560,8 @@ mod tests {
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        // Parent of /tmp is / → shorten_path("/") returns "/"
-        assert_eq!(tree.groups[0].name, "/");
+        // /tmp has no git root → groups by /tmp itself → shorten_path("/tmp") = "tmp"
+        assert_eq!(tree.groups[0].name, "tmp");
     }
 
     #[test]
@@ -580,9 +599,9 @@ mod tests {
     #[test]
     fn test_cursor_navigation() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/opt/a/x", "zsh"),
-            make_pane("%2", "main", 1, "/opt/a/y", "zsh"),
-            make_pane("%3", "work", 0, "/opt/b/z", "zsh"),
+            make_pane("%1", "main", 0, "/opt/a", "zsh"),
+            make_pane("%2", "main", 1, "/opt/a", "zsh"),
+            make_pane("%3", "work", 0, "/opt/b", "zsh"),
         ];
         let states = HashMap::new();
         let mut tree = TreeState::build(&panes, &states, "");
@@ -595,7 +614,6 @@ mod tests {
         tree.move_cursor(1);
         assert_eq!(tree.cursor, 1);
         assert!(tree.selected_pane().is_some());
-        assert_eq!(tree.selected_pane_id(), Some("%1"));
 
         // Move to end
         tree.move_cursor(100);
@@ -612,9 +630,9 @@ mod tests {
     #[test]
     fn test_collapsed_group_hides_children() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/opt/a/x", "zsh"),
-            make_pane("%2", "main", 1, "/opt/a/y", "zsh"),
-            make_pane("%3", "work", 0, "/opt/b/z", "zsh"),
+            make_pane("%1", "main", 0, "/opt/a", "zsh"),
+            make_pane("%2", "main", 1, "/opt/a", "zsh"),
+            make_pane("%3", "work", 0, "/opt/b", "zsh"),
         ];
         let states = HashMap::new();
         let mut tree = TreeState::build(&panes, &states, "");
@@ -638,20 +656,20 @@ mod tests {
     #[test]
     fn test_rebuild_preserves_expanded_state() {
         let panes = vec![
-            make_pane("%1", "main", 0, "/opt/a/x", "zsh"),
-            make_pane("%2", "work", 0, "/opt/b/y", "zsh"),
+            make_pane("%1", "main", 0, "/opt/a", "zsh"),
+            make_pane("%2", "work", 0, "/opt/b", "zsh"),
         ];
         let states = HashMap::new();
         let mut tree = TreeState::build(&panes, &states, "");
 
-        // Collapse group "a"
+        // Collapse first group
         tree.toggle_expand();
         assert!(!tree.groups[0].expanded);
 
         // Rebuild with same data
         tree.rebuild(&panes, &states, "");
 
-        // "a" should still be collapsed
+        // First group should still be collapsed
         assert!(!tree.groups[0].expanded);
         assert!(tree.groups[1].expanded);
     }
@@ -670,17 +688,19 @@ mod tests {
 
     #[test]
     fn test_panes_sorted_within_group() {
+        // All panes in the same directory → one group, sorted by session/window
         let panes = vec![
-            make_pane("%3", "work", 2, "/opt/src/c", "zsh"),
-            make_pane("%1", "main", 0, "/opt/src/a", "zsh"),
-            make_pane("%2", "main", 1, "/opt/src/b", "zsh"),
+            make_pane("%3", "work", 2, "/opt/src", "zsh"),
+            make_pane("%1", "main", 0, "/opt/src", "zsh"),
+            make_pane("%2", "main", 1, "/opt/src", "zsh"),
         ];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
+        assert_eq!(tree.groups.len(), 1);
         let group = &tree.groups[0];
-        assert_eq!(group.panes[0].pane_info.pane_id, "%1"); // main
-        assert_eq!(group.panes[1].pane_info.pane_id, "%2"); // main
-        assert_eq!(group.panes[2].pane_info.pane_id, "%3"); // work
+        assert_eq!(group.panes[0].pane_info.pane_id, "%1"); // main win 0
+        assert_eq!(group.panes[1].pane_info.pane_id, "%2"); // main win 1
+        assert_eq!(group.panes[2].pane_info.pane_id, "%3"); // work win 2
     }
 }

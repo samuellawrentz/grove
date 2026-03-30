@@ -1,7 +1,7 @@
 use crossterm::event::KeyEvent;
 
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
-use crate::{recents, tmux};
+use crate::tmux;
 
 use super::app::{App, SidebarFocus};
 
@@ -140,7 +140,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.sidebar_focus = SidebarFocus::Recents;
+            app.sidebar_focus = SidebarFocus::Projects;
             return;
         }
         KeyCode::Char('j') if app.diff_mode && key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -211,7 +211,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     // Dispatch to focused pane
     match app.sidebar_focus {
         SidebarFocus::Tree => handle_tree_key(app, key),
-        SidebarFocus::Recents => handle_recents_key(app, key),
+        SidebarFocus::Projects => handle_projects_key(app, key),
     }
 }
 
@@ -346,24 +346,24 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_recents_key(app: &mut App, key: KeyEvent) {
+fn handle_projects_key(app: &mut App, key: KeyEvent) {
     use crossterm::event::KeyCode;
 
-    if app.recents.is_empty() {
+    if app.projects.is_empty() {
         return;
     }
 
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
-            if app.recents_cursor + 1 < app.recents.len() {
-                app.recents_cursor += 1;
+            if app.projects_cursor + 1 < app.projects.len() {
+                app.projects_cursor += 1;
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.recents_cursor = app.recents_cursor.saturating_sub(1);
+            app.projects_cursor = app.projects_cursor.saturating_sub(1);
         }
         KeyCode::Char('c') | KeyCode::Enter => {
-            let dir = app.recents[app.recents_cursor]
+            let dir = app.projects[app.projects_cursor]
                 .path
                 .to_string_lossy()
                 .to_string();
@@ -371,7 +371,7 @@ fn handle_recents_key(app: &mut App, key: KeyEvent) {
             launch_in_new_window(app, &dir, Some(&cmd));
         }
         KeyCode::Char('n') => {
-            let dir = app.recents[app.recents_cursor]
+            let dir = app.projects[app.projects_cursor]
                 .path
                 .to_string_lossy()
                 .to_string();
@@ -379,22 +379,26 @@ fn handle_recents_key(app: &mut App, key: KeyEvent) {
             launch_in_new_window(app, &dir, Some(&cmd));
         }
         KeyCode::Char('t') => {
-            let dir = app.recents[app.recents_cursor]
+            let dir = app.projects[app.projects_cursor]
                 .path
                 .to_string_lossy()
                 .to_string();
             launch_in_new_window(app, &dir, None);
         }
         KeyCode::Char('x') => {
-            recents::remove(app.recents_cursor);
-            app.refresh_recents();
+            let path = app.projects[app.projects_cursor]
+                .path
+                .to_string_lossy()
+                .to_string();
+            let _ = app.db.delete_project(&path);
+            app.refresh_projects();
         }
         KeyCode::Char('g') => {
-            app.recents_cursor = 0;
+            app.projects_cursor = 0;
         }
         KeyCode::Char('G') => {
-            if !app.recents.is_empty() {
-                app.recents_cursor = app.recents.len() - 1;
+            if !app.projects.is_empty() {
+                app.projects_cursor = app.projects.len() - 1;
             }
         }
         _ => {}

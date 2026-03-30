@@ -133,6 +133,10 @@ fn run(cli: Cli) -> Result<(), GroveError> {
         Commands::RecentsAdd { dir } => {
             recents::add(&dir);
         }
+        Commands::ProjectTouch { path } => {
+            let db = db::Db::open()?;
+            db.upsert_project(&path)?;
+        }
         Commands::Add {
             task_id,
             repo,
