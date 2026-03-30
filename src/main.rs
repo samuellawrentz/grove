@@ -1,5 +1,6 @@
 mod agent;
 mod cli;
+mod db;
 mod commands;
 mod config;
 mod error;
