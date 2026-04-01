@@ -49,9 +49,11 @@ pub struct Db {
 }
 
 pub struct Project {
+    #[allow(dead_code)]
     pub id: i64,
     pub path: PathBuf,
     pub name: String,
+    #[allow(dead_code)]
     pub created_at: String,
     pub last_seen: String,
 }
@@ -159,6 +161,7 @@ impl Db {
             .map_err(|e| GroveError::Database(e.to_string()))
     }
 
+    #[allow(dead_code)]
     pub fn touch_project(&self, id: i64) -> Result<(), GroveError> {
         self.conn.execute(
             "UPDATE projects SET last_seen = datetime('now') WHERE id = ?1",
@@ -329,6 +332,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn delete_repo(&self, name: &str) -> Result<(), GroveError> {
         self.conn
             .execute("DELETE FROM repos WHERE name = ?1", [name])?;
@@ -391,6 +395,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, created_at, tmux_window, pane_id FROM tasks ORDER BY created_at DESC",
         )?;
+        #[allow(clippy::type_complexity)]
         let ids: Vec<(String, String, String, Option<String>, Option<String>)> = stmt
             .query_map([], |row| {
                 Ok((
