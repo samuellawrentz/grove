@@ -14,12 +14,17 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let outer =
         Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).split(f.area());
 
-    let panels = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(50),
-        Constraint::Percentage(30),
-    ])
-    .split(outer[0]);
+    let panels = if app.show_notepad {
+        Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
+        ])
+        .split(outer[0])
+    } else {
+        Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
+            .split(outer[0])
+    };
 
     // Split sidebar into tree (top) and projects (bottom)
     let sidebar =
@@ -28,7 +33,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     draw_tree(f, app, sidebar[0]);
     draw_projects(f, app, sidebar[1]);
     draw_preview(f, app, panels[1]);
-    draw_notepad(f, app, panels[2]);
+    if app.show_notepad {
+        draw_notepad(f, app, panels[2]);
+    }
     draw_status_bar(f, app, outer[1]);
 
     // Draw prompt modal overlay on top of everything
@@ -404,13 +411,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ))
     } else {
         let hint = if app.focus == Focus::Notepad {
-            "\u{270e} Notepad (vim) | q/Esc: close & save | v:select Enter:send to pane"
+            "\u{270e} Notepad (vim) | m/Esc: unfocus | C-r: hide | v:select Enter:send to pane"
         } else if app.diff_mode {
             "j/k:nav  C-j/k:jump10  w:expand/collapse  d:close diff  q:quit"
         } else {
             match app.sidebar_focus {
                 SidebarFocus::Tree => {
-                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  m:notepad  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
+                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C-r:notepad m:focus  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
                 }
                 SidebarFocus::Projects => {
                     "j/k:nav  C-h/C-l:pane  c/Enter:continue  n:new  t:terminal  m:notepad  x:remove  q:quit"

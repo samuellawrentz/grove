@@ -53,6 +53,7 @@ pub(crate) struct App {
     pub projects_cursor: usize,
     /// When true, quit after launching a pane (popup mode).
     pub popup: bool,
+    pub show_notepad: bool,
     pub notepad: NoteState,
 }
 
@@ -107,6 +108,7 @@ impl App {
             projects_cursor: 0,
             popup,
             focus: Focus::Sidebar,
+            show_notepad: false,
             notepad: NoteState {
                 editor: EditorState::default(),
                 project: String::new(),

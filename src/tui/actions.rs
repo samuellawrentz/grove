@@ -239,7 +239,24 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('m') => {
-            app.focus = Focus::Notepad;
+            if app.show_notepad {
+                app.focus = if app.focus == Focus::Notepad {
+                    app.save_note();
+                    Focus::Sidebar
+                } else {
+                    Focus::Notepad
+                };
+            }
+            return;
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.show_notepad = !app.show_notepad;
+            if app.show_notepad {
+                app.focus = Focus::Notepad;
+            } else {
+                app.focus = Focus::Sidebar;
+                app.save_note();
+            }
             return;
         }
         KeyCode::Char('d') => {
