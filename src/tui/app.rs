@@ -19,6 +19,13 @@ pub(crate) enum SidebarFocus {
     Projects,
 }
 
+/// Which panel has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Focus {
+    Sidebar,
+    Notepad,
+}
+
 /// Main application state for the TUI.
 pub(crate) struct App {
     pub tree: TreeState,
@@ -40,13 +47,13 @@ pub(crate) struct App {
     pub diff_state: Option<DiffState>,
     pub default_agent_command: String,
     pub sidebar_focus: SidebarFocus,
+    pub focus: Focus,
     pub db: Db,
     pub projects: Vec<Project>,
     pub projects_cursor: usize,
     /// When true, quit after launching a pane (popup mode).
     pub popup: bool,
-    /// Active notepad state, None when notepad is closed.
-    pub notepad: Option<NoteState>,
+    pub notepad: NoteState,
 }
 
 pub(crate) struct NoteState {
@@ -99,12 +106,17 @@ impl App {
             projects,
             projects_cursor: 0,
             popup,
-            notepad: None,
+            focus: Focus::Sidebar,
+            notepad: NoteState {
+                editor: EditorState::default(),
+                project: String::new(),
+            },
         };
 
         app.refresh_tree();
         app.tree.jump_first_pane();
         app.refresh_preview();
+        app.sync_note_to_group();
         Ok(app)
     }
 
@@ -196,47 +208,21 @@ impl App {
     pub fn on_tick(&mut self) {
         self.refresh_tree();
         self.refresh_projects();
-        if self.notepad.is_none() {
-            self.refresh_preview();
-        }
-    }
-
-    pub fn enter_note_mode(&mut self) {
-        let project_path = self
-            .tree
-            .cursor_group()
-            .map(|g| g.path.to_string_lossy().to_string());
-        if let Some(path) = project_path {
-            self.notepad = Some(NoteState {
-                editor: self.load_note(&path),
-                project: path,
-            });
-        }
-    }
-
-    pub fn exit_note_mode(&mut self) {
-        if let Some(note) = self.notepad.take() {
-            self.save_note(&note);
-        }
+        self.refresh_preview();
     }
 
     pub fn sync_note_to_group(&mut self) {
-        let Some(ref note) = self.notepad else {
-            return;
-        };
         let current_path = self
             .tree
             .cursor_group()
             .map(|g| g.path.to_string_lossy().to_string());
-        if current_path.as_deref() != Some(note.project.as_str()) {
-            let old = self.notepad.take().unwrap();
-            self.save_note(&old);
-            if let Some(path) = current_path {
-                self.notepad = Some(NoteState {
-                    editor: self.load_note(&path),
-                    project: path,
-                });
-            }
+        let Some(path) = current_path else {
+            return;
+        };
+        if path != self.notepad.project {
+            self.save_note();
+            self.notepad.editor = self.load_note(&path);
+            self.notepad.project = path;
         }
     }
 
@@ -252,9 +238,12 @@ impl App {
         EditorState::new(Lines::from(content.as_str()))
     }
 
-    fn save_note(&mut self, note: &NoteState) {
-        let content = note.editor.lines.to_string();
-        if let Err(e) = self.db.save_note(&note.project, &content) {
+    pub fn save_note(&mut self) {
+        if self.notepad.project.is_empty() {
+            return;
+        }
+        let content = self.notepad.editor.lines.to_string();
+        if let Err(e) = self.db.save_note(&self.notepad.project, &content) {
             self.status_message = Some(format!("Failed to save note: {e}"));
         }
     }

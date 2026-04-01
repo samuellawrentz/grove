@@ -1,4 +1,5 @@
 pub mod add;
+pub mod compose;
 pub mod attach;
 pub mod close;
 pub mod init;

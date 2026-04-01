@@ -131,6 +131,14 @@ fn run(cli: Cli) -> Result<(), GroveError> {
         Commands::ProjectTouch { path } => {
             db.upsert_project(&path)?;
         }
+        Commands::Compose { target } => {
+            if !tmux::is_inside_tmux() {
+                return Err(GroveError::TmuxNotRunning(
+                    "grove compose must be run inside tmux".into(),
+                ));
+            }
+            commands::compose::run(target.as_deref())?;
+        }
         Commands::Add {
             task_id,
             repo,

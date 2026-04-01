@@ -130,6 +130,13 @@ pub enum Commands {
         path: String,
     },
 
+    /// Open editor to compose and send text to a tmux pane
+    Compose {
+        /// Target pane ID (default: pane above the current one)
+        #[arg(long)]
+        target: Option<String>,
+    },
+
     /// Add a repo to an existing task
     Add {
         /// Task identifier

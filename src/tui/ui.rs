@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use super::app::{App, SidebarFocus};
+use super::app::{App, Focus, SidebarFocus};
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY, TERMINAL_ICON};
 
 /// Draw the TUI frame.
@@ -14,8 +14,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let outer =
         Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).split(f.area());
 
-    let panels = Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(outer[0]);
+    let panels = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(50),
+        Constraint::Percentage(30),
+    ])
+    .split(outer[0]);
 
     // Split sidebar into tree (top) and projects (bottom)
     let sidebar =
@@ -23,11 +27,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 
     draw_tree(f, app, sidebar[0]);
     draw_projects(f, app, sidebar[1]);
-    if app.notepad.is_some() {
-        draw_notepad(f, app, panels[1]);
-    } else {
-        draw_preview(f, app, panels[1]);
-    }
+    draw_preview(f, app, panels[1]);
+    draw_notepad(f, app, panels[2]);
     draw_status_bar(f, app, outer[1]);
 
     // Draw prompt modal overlay on top of everything
@@ -303,28 +304,38 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn draw_notepad(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let note = app.notepad.as_mut().unwrap();
-    let project_name = std::path::Path::new(&note.project)
+    let focused = app.focus == Focus::Notepad;
+    let project_name = std::path::Path::new(&app.notepad.project)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("notes");
-    let mode_label = format!("{:?}", note.editor.mode).to_uppercase();
-    let title = format!(" \u{270e} Notepad: {} [{}] ", project_name, mode_label);
+    let title = if focused {
+        let mode_label = format!("{:?}", app.notepad.editor.mode).to_uppercase();
+        format!(" \u{270e} Notepad: {} [{}] ", project_name, mode_label)
+    } else {
+        format!(" \u{270e} Notepad: {} ", project_name)
+    };
 
+    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(border_color))
         .title(title);
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let cursor_style = if focused {
+        Style::default().bg(Color::White).fg(Color::Black)
+    } else {
+        Style::default()
+    };
     let theme = EditorTheme::default()
         .base(Style::default().fg(Color::White))
-        .cursor_style(Style::default().bg(Color::White).fg(Color::Black))
+        .cursor_style(cursor_style)
         .line_numbers_style(Style::default().fg(Color::DarkGray));
 
-    EditorView::new(&mut note.editor)
+    EditorView::new(&mut app.notepad.editor)
         .theme(theme)
         .wrap(true)
         .render(inner, f.buffer_mut());
@@ -392,7 +403,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Style::default().fg(Color::Yellow),
         ))
     } else {
-        let hint = if app.notepad.is_some() {
+        let hint = if app.focus == Focus::Notepad {
             "\u{270e} Notepad (vim) | q/Esc: close & save | v:select Enter:send to pane"
         } else if app.diff_mode {
             "j/k:nav  C-j/k:jump10  w:expand/collapse  d:close diff  q:quit"

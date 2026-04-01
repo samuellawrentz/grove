@@ -5,7 +5,7 @@ use edtui::{EditorEventHandler, EditorMode};
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
 use crate::tmux;
 
-use super::app::{App, SidebarFocus};
+use super::app::{App, Focus, SidebarFocus};
 
 /// Handle a key event in the TUI.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
@@ -20,16 +20,17 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Notepad mode: pass keys to edtui, exit on Esc/q in normal mode
-    if let Some(ref mut note) = app.notepad {
+    // Notepad focused: pass keys to edtui, Esc/q in normal mode returns focus to sidebar
+    if app.focus == Focus::Notepad {
+        let note = &mut app.notepad;
         enum NoteAction {
-            Exit,
+            Unfocus,
             Send(String),
             Forward,
         }
         let action = match (&note.editor.mode, key.code) {
             (EditorMode::Normal, KeyCode::Esc) | (EditorMode::Normal, KeyCode::Char('q')) => {
-                NoteAction::Exit
+                NoteAction::Unfocus
             }
             (EditorMode::Visual, KeyCode::Enter) => {
                 let text = note
@@ -45,7 +46,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             _ => NoteAction::Forward,
         };
         match action {
-            NoteAction::Exit => app.exit_note_mode(),
+            NoteAction::Unfocus => {
+                app.focus = Focus::Sidebar;
+                app.save_note();
+            }
             NoteAction::Send(text) => {
                 if !text.is_empty() {
                     if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
@@ -55,7 +59,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                 }
             }
             NoteAction::Forward => {
-                EditorEventHandler::default().on_key_event(key, &mut note.editor);
+                EditorEventHandler::default().on_key_event(key, &mut app.notepad.editor);
             }
         }
         return;
@@ -235,7 +239,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('m') => {
-            app.enter_note_mode();
+            app.focus = Focus::Notepad;
             return;
         }
         KeyCode::Char('d') => {
