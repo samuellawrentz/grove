@@ -111,6 +111,10 @@ impl Db {
             self.conn.execute_batch(SCHEMA_V1)?;
             self.conn.pragma_update(None, "user_version", 1)?;
         }
+        if version < 2 {
+            self.conn.execute_batch(SCHEMA_V2)?;
+            self.conn.pragma_update(None, "user_version", 2)?;
+        }
         Ok(())
     }
 
@@ -273,6 +277,31 @@ impl Db {
         let migrated = grove_dir.join("state.json.migrated");
         let _ = std::fs::rename(&state_path, &migrated);
         Ok(count)
+    }
+
+    // ── Notes ─────────────────────────────────────────────────────────────────
+
+    pub fn get_note(&self, project_path: &str) -> Result<Option<String>, GroveError> {
+        let (canonical, _) = canonical_path_and_name(project_path);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content FROM notes WHERE project_path = ?1")?;
+        let mut rows = stmt.query([&canonical])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save_note(&self, project_path: &str, content: &str) -> Result<(), GroveError> {
+        let (canonical, _) = canonical_path_and_name(project_path);
+        self.conn.execute(
+            "INSERT INTO notes (project_path, content) VALUES (?1, ?2)
+             ON CONFLICT(project_path) DO UPDATE SET content = ?2, updated_at = datetime('now')",
+            rusqlite::params![canonical, content],
+        )?;
+        Ok(())
     }
 
     // ── Repos ─────────────────────────────────────────────────────────────────
@@ -501,6 +530,15 @@ CREATE TABLE IF NOT EXISTS task_repos (
 CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
 ";
 
+const SCHEMA_V2: &str = "
+CREATE TABLE IF NOT EXISTS notes (
+    id           INTEGER PRIMARY KEY,
+    project_path TEXT NOT NULL UNIQUE,
+    content      TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,7 +559,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -644,5 +682,29 @@ mod tests {
         let projects = db.list_projects().unwrap();
         assert_eq!(projects.len(), 1);
         assert!(projects[0].last_seen.starts_with("2024-01-15"));
+    }
+
+    #[test]
+    fn test_note_roundtrip() {
+        let db = open_temp();
+        // No note initially
+        assert!(db.get_note("/tmp").unwrap().is_none());
+
+        // Save and retrieve
+        db.save_note("/tmp", "hello world").unwrap();
+        assert_eq!(db.get_note("/tmp").unwrap().unwrap(), "hello world");
+
+        // Update existing note
+        db.save_note("/tmp", "updated content").unwrap();
+        assert_eq!(db.get_note("/tmp").unwrap().unwrap(), "updated content");
+    }
+
+    #[test]
+    fn test_note_per_project() {
+        let db = open_temp();
+        db.save_note("/tmp/a", "note a").unwrap();
+        db.save_note("/tmp/b", "note b").unwrap();
+        assert_eq!(db.get_note("/tmp/a").unwrap().unwrap(), "note a");
+        assert_eq!(db.get_note("/tmp/b").unwrap().unwrap(), "note b");
     }
 }

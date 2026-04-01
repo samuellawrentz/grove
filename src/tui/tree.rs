@@ -14,17 +14,49 @@ fn resolve_project_root(path: &Path) -> PathBuf {
     if let Some(root) = map.get(&canonical) {
         return root.clone();
     }
-    let root = std::process::Command::new("git")
+    let git_root = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(&canonical)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| PathBuf::from(s.trim()))
-        .unwrap_or_else(|| canonical.clone());
+        .map(|s| PathBuf::from(s.trim()));
+
+    let root = match git_root {
+        Some(ref gr) => {
+            // Check if git root's parent is a workspace (no .git, 2+ .git children)
+            if let Some(parent) = gr.parent() {
+                if is_workspace(parent) {
+                    parent.to_path_buf()
+                } else {
+                    gr.clone()
+                }
+            } else {
+                gr.clone()
+            }
+        }
+        None => canonical.clone(),
+    };
     map.insert(canonical, root.clone());
     root
+}
+
+/// A workspace is a directory that has no .git itself but contains 2+ direct
+/// child directories with .git. Only checks immediate children to avoid
+/// false positives on broad directories like ~/src/.
+fn is_workspace(dir: &Path) -> bool {
+    if dir.join(".git").exists() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let git_child_count = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join(".git").exists())
+        .count();
+    git_child_count >= 2
 }
 
 /// A group of panes sharing the same working directory basename.

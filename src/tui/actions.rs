@@ -1,5 +1,7 @@
 use crossterm::event::KeyEvent;
 
+use edtui::{EditorEventHandler, EditorMode};
+
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
 use crate::tmux;
 
@@ -15,6 +17,47 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     // Ctrl-C always quits
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
+        return;
+    }
+
+    // Notepad mode: pass keys to edtui, exit on Esc/q in normal mode
+    if let Some(ref mut note) = app.notepad {
+        enum NoteAction {
+            Exit,
+            Send(String),
+            Forward,
+        }
+        let action = match (&note.editor.mode, key.code) {
+            (EditorMode::Normal, KeyCode::Esc) | (EditorMode::Normal, KeyCode::Char('q')) => {
+                NoteAction::Exit
+            }
+            (EditorMode::Visual, KeyCode::Enter) => {
+                let text = note
+                    .editor
+                    .selection
+                    .as_ref()
+                    .map(|sel| sel.copy_from(&note.editor.lines).to_string())
+                    .unwrap_or_default();
+                note.editor.mode = EditorMode::Normal;
+                note.editor.selection = None;
+                NoteAction::Send(text)
+            }
+            _ => NoteAction::Forward,
+        };
+        match action {
+            NoteAction::Exit => app.exit_note_mode(),
+            NoteAction::Send(text) => {
+                if !text.is_empty() {
+                    if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
+                        let _ = tmux::send_keys(&pane_id, &text, app.verbose);
+                        app.status_message = Some("Sent to pane".to_string());
+                    }
+                }
+            }
+            NoteAction::Forward => {
+                EditorEventHandler::default().on_key_event(key, &mut note.editor);
+            }
+        }
         return;
     }
 
@@ -191,6 +234,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.refresh_preview();
             return;
         }
+        KeyCode::Char('m') => {
+            app.enter_note_mode();
+            return;
+        }
         KeyCode::Char('d') => {
             app.diff_mode = !app.diff_mode;
             app.preview_scroll_up = 0;
@@ -223,12 +270,14 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
             app.tree.move_cursor_to_pane(true);
             update_scroll(app);
             app.preview_scroll_up = 0;
+            app.sync_note_to_group();
             app.refresh_preview();
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.tree.move_cursor_to_pane(false);
             update_scroll(app);
             app.preview_scroll_up = 0;
+            app.sync_note_to_group();
             app.refresh_preview();
         }
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {

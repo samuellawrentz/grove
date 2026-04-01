@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use edtui::{EditorState, Lines};
+
 use crate::agent::AgentFilter;
 use crate::config::GroveConfig;
 use crate::db::{Db, Project};
@@ -43,6 +45,13 @@ pub(crate) struct App {
     pub projects_cursor: usize,
     /// When true, quit after launching a pane (popup mode).
     pub popup: bool,
+    /// Active notepad state, None when notepad is closed.
+    pub notepad: Option<NoteState>,
+}
+
+pub(crate) struct NoteState {
+    pub editor: EditorState,
+    pub project: String,
 }
 
 impl App {
@@ -90,6 +99,7 @@ impl App {
             projects,
             projects_cursor: 0,
             popup,
+            notepad: None,
         };
 
         app.refresh_tree();
@@ -186,6 +196,66 @@ impl App {
     pub fn on_tick(&mut self) {
         self.refresh_tree();
         self.refresh_projects();
-        self.refresh_preview();
+        if self.notepad.is_none() {
+            self.refresh_preview();
+        }
+    }
+
+    pub fn enter_note_mode(&mut self) {
+        let project_path = self
+            .tree
+            .cursor_group()
+            .map(|g| g.path.to_string_lossy().to_string());
+        if let Some(path) = project_path {
+            self.notepad = Some(NoteState {
+                editor: self.load_note(&path),
+                project: path,
+            });
+        }
+    }
+
+    pub fn exit_note_mode(&mut self) {
+        if let Some(note) = self.notepad.take() {
+            self.save_note(&note);
+        }
+    }
+
+    pub fn sync_note_to_group(&mut self) {
+        let Some(ref note) = self.notepad else {
+            return;
+        };
+        let current_path = self
+            .tree
+            .cursor_group()
+            .map(|g| g.path.to_string_lossy().to_string());
+        if current_path.as_deref() != Some(note.project.as_str()) {
+            let old = self.notepad.take().unwrap();
+            self.save_note(&old);
+            if let Some(path) = current_path {
+                self.notepad = Some(NoteState {
+                    editor: self.load_note(&path),
+                    project: path,
+                });
+            }
+        }
+    }
+
+    fn load_note(&self, path: &str) -> EditorState {
+        let content = match self.db.get_note(path) {
+            Ok(Some(c)) => c,
+            Ok(None) => String::new(),
+            Err(e) => {
+                eprintln!("Note load error: {e}");
+                String::new()
+            }
+        };
+        EditorState::new(Lines::from(content.as_str()))
+    }
+
+    fn save_note(&mut self, note: &NoteState) {
+        let content = note.editor.lines.to_string();
+        if let Err(e) = self.db.save_note(&note.project, &content) {
+            self.status_message = Some(format!("Failed to save note: {e}"));
+        }
     }
 }

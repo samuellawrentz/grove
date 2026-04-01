@@ -1,14 +1,15 @@
+use edtui::{EditorTheme, EditorView};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use super::app::{App, SidebarFocus};
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY, TERMINAL_ICON};
 
 /// Draw the TUI frame.
-pub(crate) fn draw(f: &mut Frame, app: &App) {
+pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let bar_height = 1;
     let outer =
         Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).split(f.area());
@@ -22,7 +23,11 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 
     draw_tree(f, app, sidebar[0]);
     draw_projects(f, app, sidebar[1]);
-    draw_preview(f, app, panels[1]);
+    if app.notepad.is_some() {
+        draw_notepad(f, app, panels[1]);
+    } else {
+        draw_preview(f, app, panels[1]);
+    }
     draw_status_bar(f, app, outer[1]);
 
     // Draw prompt modal overlay on top of everything
@@ -297,6 +302,34 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(preview, area);
 }
 
+fn draw_notepad(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let note = app.notepad.as_mut().unwrap();
+    let project_name = std::path::Path::new(&note.project)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("notes");
+    let mode_label = format!("{:?}", note.editor.mode).to_uppercase();
+    let title = format!(" \u{270e} Notepad: {} [{}] ", project_name, mode_label);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let theme = EditorTheme::default()
+        .base(Style::default().fg(Color::White))
+        .cursor_style(Style::default().bg(Color::White).fg(Color::Black))
+        .line_numbers_style(Style::default().fg(Color::DarkGray));
+
+    EditorView::new(&mut note.editor)
+        .theme(theme)
+        .wrap(true)
+        .render(inner, f.buffer_mut());
+}
+
 fn draw_prompt_modal(f: &mut Frame, input: &str) {
     let area = f.area();
     let width = (area.width / 2).max(40).min(area.width.saturating_sub(4));
@@ -359,15 +392,17 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Style::default().fg(Color::Yellow),
         ))
     } else {
-        let hint = if app.diff_mode {
+        let hint = if app.notepad.is_some() {
+            "\u{270e} Notepad (vim) | q/Esc: close & save | v:select Enter:send to pane"
+        } else if app.diff_mode {
             "j/k:nav  C-j/k:jump10  w:expand/collapse  d:close diff  q:quit"
         } else {
             match app.sidebar_focus {
                 SidebarFocus::Tree => {
-                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
+                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  m:notepad  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
                 }
                 SidebarFocus::Projects => {
-                    "j/k:nav  C-h/C-l:pane  c/Enter:continue  n:new  t:terminal  x:remove  q:quit"
+                    "j/k:nav  C-h/C-l:pane  c/Enter:continue  n:new  t:terminal  m:notepad  x:remove  q:quit"
                 }
             }
         };

@@ -48,7 +48,7 @@ pub(crate) fn run_event_loop(
     loop {
         // Draw
         terminal
-            .draw(|f| ui::draw(f, app))
+            .draw(|f| ui::draw(f, &mut *app))
             .map_err(|e| GroveError::Tui(format!("draw error: {e}")))?;
 
         if app.should_quit {
