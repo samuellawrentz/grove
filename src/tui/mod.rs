@@ -32,7 +32,7 @@ fn restore_terminal() {
 }
 
 /// Entry point for the TUI.
-pub(crate) fn run(verbose: bool) -> Result<(), GroveError> {
+pub(crate) fn run(verbose: bool, popup: bool) -> Result<(), GroveError> {
     // Set up terminal
     enable_raw_mode().map_err(|e| GroveError::Tui(format!("failed to enable raw mode: {e}")))?;
     execute!(io::stdout(), EnterAlternateScreen)
@@ -60,7 +60,7 @@ pub(crate) fn run(verbose: bool) -> Result<(), GroveError> {
     // Register tmux hooks to track projects
     crate::tmux::register_project_hooks(verbose);
 
-    let mut app = app::App::new(verbose)?;
+    let mut app = app::App::new(verbose, popup)?;
 
     let result = event::run_event_loop(&mut terminal, &mut app);
 

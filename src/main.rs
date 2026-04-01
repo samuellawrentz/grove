@@ -117,7 +117,7 @@ fn run(cli: Cli) -> Result<(), GroveError> {
         Commands::Send { task_id, prompt } => {
             commands::send::run(&task_id, &prompt, &db, json_mode, verbose)?;
         }
-        Commands::Tui => {
+        Commands::Tui { popup } => {
             if !tmux::is_tmux_available() {
                 return Err(GroveError::TmuxNotRunning("tmux is not installed".into()));
             }
@@ -126,7 +126,7 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                     "grove tui must be run inside tmux".into(),
                 ));
             }
-            tui::run(verbose)?;
+            tui::run(verbose, popup)?;
         }
         Commands::ProjectTouch { path } => {
             db.upsert_project(&path)?;

@@ -41,11 +41,13 @@ pub(crate) struct App {
     pub db: Db,
     pub projects: Vec<Project>,
     pub projects_cursor: usize,
+    /// When true, quit after launching a pane (popup mode).
+    pub popup: bool,
 }
 
 impl App {
     /// Create a new App, querying the TUI's own pane ID.
-    pub fn new(verbose: bool) -> Result<Self, GroveError> {
+    pub fn new(verbose: bool, popup: bool) -> Result<Self, GroveError> {
         let my_pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
         let my_pane_id = if my_pane_id.is_empty() {
             tmux::get_pane_id("", verbose).unwrap_or_default()
@@ -87,6 +89,7 @@ impl App {
             db,
             projects,
             projects_cursor: 0,
+            popup,
         };
 
         app.refresh_tree();

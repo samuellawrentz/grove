@@ -117,7 +117,11 @@ pub enum Commands {
     },
 
     /// Interactive TUI pane manager
-    Tui,
+    Tui {
+        /// Quit after launching a pane (for tmux popup usage)
+        #[arg(long)]
+        popup: bool,
+    },
 
     /// Register a directory path as a project (used by tmux hooks)
     #[clap(hide = true)]

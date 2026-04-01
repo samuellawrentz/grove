@@ -24,7 +24,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Enter => {
                 if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
                     let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-                    app.should_quit = true;
+                    app.should_quit = app.popup;
                 }
                 app.search_input = None;
                 app.tree.search_filter = None;
@@ -243,7 +243,7 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
                 let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-                app.should_quit = true;
+                app.should_quit = app.popup;
             }
         }
         KeyCode::Char('a') => {
@@ -432,7 +432,7 @@ fn launch_split(app: &mut App, target: &str, cwd: &str, cmd: Option<&str>) {
     match tmux::split_window(target, cwd, cmd, app.verbose) {
         Ok(new_pane_id) => {
             let _ = tmux::switch_to_pane(&new_pane_id, app.verbose);
-            app.should_quit = true;
+            app.should_quit = app.popup;
         }
         Err(e) => {
             app.status_message = Some(format!("split failed: {e}"));
@@ -445,7 +445,7 @@ fn launch_in_new_window(app: &mut App, dir: &str, cmd: Option<&str>) {
     match tmux::new_window(dir, cmd, app.verbose) {
         Ok(pane_id) => {
             let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-            app.should_quit = true;
+            app.should_quit = app.popup;
         }
         Err(e) => {
             app.status_message = Some(format!("new window failed: {e}"));
