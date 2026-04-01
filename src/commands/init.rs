@@ -3,10 +3,10 @@ use dialoguer::{Input, MultiSelect};
 
 use crate::agent;
 use crate::config::GroveConfig;
+use crate::db::{Db, TaskEntry, TaskRepo};
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
-use crate::state::{GroveState, TaskEntry, TaskRepo};
 use crate::tmux;
 use crate::validation::validate_identifier;
 
@@ -22,24 +22,21 @@ pub struct InitOptions<'a> {
     pub agent: Option<&'a str>,
 }
 
-/// Interactive mode: prompt user to select repos and branch name.
-/// Returns (selected_repos, branch_name).
 fn interactive_prompt(
     task_id: &str,
     cli_repos: &[String],
     cli_branch: Option<&str>,
-    state: &GroveState,
+    db: &Db,
 ) -> Result<(Vec<String>, String), GroveError> {
-    if state.repos.is_empty() {
+    let all_repos = db.list_repos()?;
+    if all_repos.is_empty() {
         return Err(GroveError::General(
             "no repos registered. Use `grove register` first.".to_string(),
         ));
     }
 
-    // If repos were already provided on CLI, use them; otherwise prompt
     let selected_repos = if cli_repos.is_empty() {
-        let mut repo_names: Vec<String> = state.repos.keys().cloned().collect();
-        repo_names.sort();
+        let repo_names: Vec<String> = all_repos.iter().map(|r| r.name.clone()).collect();
 
         let selections = MultiSelect::new()
             .with_prompt("Select repos for this task")
@@ -59,7 +56,6 @@ fn interactive_prompt(
         cli_repos.to_vec()
     };
 
-    // Prompt for branch name (skip if already provided on CLI)
     let branch = if let Some(b) = cli_branch {
         b.to_string()
     } else {
@@ -77,15 +73,14 @@ pub fn run(
     task_id: &str,
     opts: &InitOptions,
     config: &GroveConfig,
-    state: &mut GroveState,
+    db: &Db,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
     validate_identifier(task_id, "task-id")?;
 
-    // Resolve repos and branch: interactive or CLI args
     let (resolved_repos, resolved_branch) = if opts.interactive {
-        interactive_prompt(task_id, opts.repos, opts.branch, state)?
+        interactive_prompt(task_id, opts.repos, opts.branch, db)?
     } else {
         if opts.repos.is_empty() {
             return Err(GroveError::General(
@@ -97,21 +92,21 @@ pub fn run(
     };
 
     // Validate all repo names are registered
+    let all_repos = db.list_repos()?;
     for repo_name in &resolved_repos {
-        if !state.repos.contains_key(repo_name.as_str()) {
+        if !all_repos.iter().any(|r| r.name == *repo_name) {
             return Err(GroveError::RepoNotRegistered(repo_name.clone()));
         }
     }
 
-    // Idempotency: check if task already exists in state
-    if let Some(existing) = state.tasks.get(task_id) {
+    // Idempotency: check if task already exists
+    if let Some(existing) = db.get_task(task_id)? {
         if existing.is_stale() {
-            // Stale entry — clean up orphaned worktree refs and branches, then proceed
             eprintln!(
                 "Warning: task '{task_id}' has stale state (directories missing). Re-creating."
             );
             for task_repo in &existing.repos {
-                if let Some(repo_entry) = state.repos.get(&task_repo.repo_name) {
+                if let Some(repo_entry) = all_repos.iter().find(|r| r.name == task_repo.repo_name) {
                     if repo_entry.path.exists() {
                         let _ =
                             git::run_git(&["worktree", "prune"], Some(&repo_entry.path), verbose);
@@ -123,9 +118,8 @@ pub fn run(
                     }
                 }
             }
-            state.tasks.remove(task_id);
+            db.delete_task(task_id)?;
         } else {
-            // Non-stale: check if repo list matches
             let mut existing_repos: Vec<&str> = existing
                 .repos
                 .iter()
@@ -158,17 +152,16 @@ pub fn run(
 
     let branch_name = &resolved_branch;
     let task_dir = config.tasks_dir.join(task_id);
-
-    // Create task directory
     std::fs::create_dir_all(&task_dir)?;
 
-    // Create worktrees with rollback on failure
     let mut created_worktrees: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     let mut task_repos: Vec<TaskRepo> = Vec::new();
 
     let create_result = (|| -> Result<(), GroveError> {
         for repo_name in &resolved_repos {
-            let repo_entry = state.repos.get(repo_name.as_str())
+            let repo_entry = all_repos
+                .iter()
+                .find(|r| r.name == *repo_name)
                 .ok_or_else(|| GroveError::RepoNotRegistered(repo_name.clone()))?;
             let bare_path = &repo_entry.path;
             let base_branch = opts.base.unwrap_or(&repo_entry.default_branch);
@@ -194,10 +187,8 @@ pub fn run(
         return Err(e);
     }
 
-    // Capture now once for both CONTEXT.md date and created_at
     let now = Utc::now();
 
-    // Write CONTEXT.md
     let context_content = if let Some(ctx) = opts.context {
         ctx.to_string()
     } else {
@@ -213,7 +204,6 @@ pub fn run(
     };
     std::fs::write(task_dir.join("CONTEXT.md"), &context_content)?;
 
-    // --- Tmux window creation ---
     let mut tmux_window: Option<String> = None;
     let mut pane_id: Option<String> = None;
 
@@ -234,13 +224,11 @@ pub fn run(
                 }
                 Err(e) => {
                     eprintln!("Warning: tmux window creation failed: {e}");
-                    // Continue without tmux — worktrees are still valid
                 }
             }
         }
     }
 
-    // Update state only after all worktrees succeeded
     let task_entry = TaskEntry {
         id: task_id.to_string(),
         path: task_dir.clone(),
@@ -249,10 +237,9 @@ pub fn run(
         tmux_window: tmux_window.clone(),
         pane_id: pane_id.clone(),
     };
-    state.tasks.insert(task_id.to_string(), task_entry);
-    state.save()?;
+    db.upsert_task(&task_entry)?;
+    db.upsert_project(&task_dir.to_string_lossy())?;
 
-    // Auto-attach AFTER state save (select_window doesn't block like attach_session)
     if let Some(ref target) = tmux_window {
         if config.auto_attach && !opts.no_attach {
             let _ = tmux::select_window(target, verbose);
@@ -280,8 +267,6 @@ pub fn run(
     Ok(())
 }
 
-/// Create a tmux window for the task and optionally launch Claude.
-/// Returns (window_target, pane_id).
 fn create_tmux_window(
     task_id: &str,
     task_dir: &std::path::Path,
@@ -293,7 +278,6 @@ fn create_tmux_window(
     let window_name = format!("{}-{}", config.tmux.session_prefix, task_id);
     let window_target = format!("{session}:{window_name}");
 
-    // Create-or-get: attempt creation, handle "already exists" as success
     if tmux::window_exists(&session, &window_name, verbose) {
         if verbose {
             eprintln!("tmux window '{window_name}' already exists, reusing");
@@ -304,7 +288,6 @@ fn create_tmux_window(
 
     let pane_id = tmux::get_pane_id(&window_target, verbose)?;
 
-    // Launch agent if configured
     if !opts.no_claude && config.auto_launch_claude {
         let agent_name = opts.agent.unwrap_or("claude");
         let cmd = config.resolved_agent_command(agent_name);

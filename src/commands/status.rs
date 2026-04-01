@@ -1,30 +1,30 @@
 use crate::agent;
+use crate::db::Db;
 use crate::error::GroveError;
 use crate::output;
-use crate::state::GroveState;
 
 pub fn run(
     task_id: Option<&str>,
-    state: &GroveState,
+    db: &Db,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
+    let all_tasks = db.list_tasks()?;
+
     // If specific task requested, verify it exists
     if let Some(id) = task_id {
-        if !state.tasks.contains_key(id) {
+        if !all_tasks.iter().any(|t| t.id == id) {
             return Err(GroveError::TaskNotFound(id.to_string()));
         }
     }
 
     let agent_states = agent::read_state_file().unwrap_or_default();
 
-    let mut tasks: Vec<_> = state.tasks.values().collect();
-    tasks.sort_by(|a, b| a.id.cmp(&b.id));
-
-    // Filter to specific task if requested
-    if let Some(id) = task_id {
-        tasks.retain(|t| t.id == id);
-    }
+    let tasks: Vec<_> = if let Some(id) = task_id {
+        all_tasks.into_iter().filter(|t| t.id == id).collect()
+    } else {
+        all_tasks
+    };
 
     if json_mode {
         let task_list: Vec<serde_json::Value> = tasks

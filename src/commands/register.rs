@@ -1,26 +1,25 @@
 use chrono::Utc;
 
 use crate::config::GroveConfig;
+use crate::db::{Db, RepoEntry};
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
-use crate::state::{GroveState, RepoEntry};
 use crate::validation::validate_identifier;
 
 pub fn run(
     name: &str,
     url: &str,
     config: &GroveConfig,
-    state: &mut GroveState,
+    db: &Db,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
     validate_identifier(name, "repo name")?;
 
     // Check if already registered
-    if let Some(existing) = state.repos.get(name) {
+    if let Some(existing) = db.get_repo(name)? {
         if existing.url == url {
-            // Idempotent: same URL, return success
             let data = serde_json::json!({
                 "name": existing.name,
                 "url": existing.url,
@@ -42,7 +41,6 @@ pub fn run(
         }
     }
 
-    // Create repos dir if needed
     std::fs::create_dir_all(&config.repos_dir)?;
 
     let bare_path = config.repos_dir.join(format!("{name}.git"));
@@ -53,7 +51,6 @@ pub fn run(
         )));
     }
 
-    // Clone bare
     let default_branch = git::bare_clone(url, &bare_path, verbose)?;
 
     let entry = RepoEntry {
@@ -65,8 +62,7 @@ pub fn run(
         last_synced_at: None,
     };
 
-    state.repos.insert(name.to_string(), entry);
-    state.save()?;
+    db.upsert_repo(&entry)?;
 
     let data = serde_json::json!({
         "name": name,

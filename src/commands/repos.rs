@@ -1,16 +1,14 @@
+use crate::db::Db;
 use crate::error::GroveError;
 use crate::output;
-use crate::state::GroveState;
 
-pub fn run(state: &GroveState, json_mode: bool) -> Result<(), GroveError> {
-    if state.repos.is_empty() {
+pub fn run(db: &Db, json_mode: bool) -> Result<(), GroveError> {
+    let repos = db.list_repos()?;
+    if repos.is_empty() {
         let data = serde_json::json!({ "repos": [] });
         output::success(json_mode, "No repos registered", data);
         return Ok(());
     }
-
-    let mut repos: Vec<_> = state.repos.values().collect();
-    repos.sort_by(|a, b| a.name.cmp(&b.name));
 
     if json_mode {
         let repo_list: Vec<serde_json::Value> = repos

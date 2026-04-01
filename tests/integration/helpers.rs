@@ -11,7 +11,7 @@ pub struct TestFixture {
     #[allow(dead_code)]
     pub grove_dir: PathBuf,
     pub config_path: PathBuf,
-    pub state_path: PathBuf,
+    pub db_path: PathBuf,
 }
 
 impl TestFixture {
@@ -27,7 +27,7 @@ impl TestFixture {
         std::fs::create_dir_all(&grove_dir).unwrap();
 
         let config_path = grove_dir.join("config.json");
-        let state_path = grove_dir.join("state.json");
+        let db_path = grove_dir.join("grove.db");
 
         // Write config pointing to our temp dirs
         let config = serde_json::json!({
@@ -43,7 +43,7 @@ impl TestFixture {
             tasks_dir,
             grove_dir,
             config_path,
-            state_path,
+            db_path,
         }
     }
 

@@ -119,11 +119,11 @@ pub enum Commands {
     /// Interactive TUI pane manager
     Tui,
 
-    /// Record a directory in recents (used by tmux hooks)
-    #[command(name = "recents-add", hide = true)]
-    RecentsAdd {
-        /// Directory path
-        dir: String,
+    /// Register a directory path as a project (used by tmux hooks)
+    #[clap(hide = true)]
+    ProjectTouch {
+        /// Directory path to register as project
+        path: String,
     },
 
     /// Add a repo to an existing task

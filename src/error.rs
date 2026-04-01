@@ -24,6 +24,9 @@ pub enum GroveError {
 
     #[error("{0}")]
     Tui(String),
+
+    #[error("database error: {0}")]
+    Database(String),
 }
 
 impl GroveError {
@@ -37,6 +40,7 @@ impl GroveError {
             GroveError::UncommittedChanges(_) => 5,
             GroveError::Conflict(_) => 6,
             GroveError::Tui(_) => 7,
+            GroveError::Database(_) => 8,
         }
     }
 
@@ -50,6 +54,7 @@ impl GroveError {
             GroveError::UncommittedChanges(_) => "uncommitted_changes",
             GroveError::Conflict(_) => "conflict",
             GroveError::Tui(_) => "tui",
+            GroveError::Database(_) => "database",
         }
     }
 
@@ -73,5 +78,11 @@ impl From<std::io::Error> for GroveError {
 impl From<serde_json::Error> for GroveError {
     fn from(e: serde_json::Error) -> Self {
         GroveError::General(format!("JSON error: {e}"))
+    }
+}
+
+impl From<rusqlite::Error> for GroveError {
+    fn from(e: rusqlite::Error) -> Self {
+        GroveError::Database(e.to_string())
     }
 }

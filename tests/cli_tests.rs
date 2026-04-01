@@ -66,11 +66,12 @@ fn register_bare_repo_and_verify_state() {
         .success()
         .stdout(predicate::str::contains("Registered 'myrepo'"));
 
-    // Verify state file exists and contains the repo
-    let state_contents = std::fs::read_to_string(&fix.state_path).unwrap();
-    let state: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
-    assert!(state["repos"]["myrepo"].is_object());
-    assert_eq!(state["repos"]["myrepo"]["name"], "myrepo");
+    // Verify db contains the repo
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let name: String = conn
+        .query_row("SELECT name FROM repos WHERE name = 'myrepo'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(name, "myrepo");
 }
 
 #[test]
@@ -279,23 +280,15 @@ fn init_partial_failure_rollback() {
         .assert()
         .success();
 
-    // Manually register a fake repo with a nonexistent bare path in state
+    // Manually register a fake repo with a nonexistent bare path in db
     // to trigger worktree creation failure on the second repo
-    let state_contents = std::fs::read_to_string(&fix.state_path).unwrap();
-    let mut state: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
-    state["repos"]["bad-repo"] = serde_json::json!({
-        "name": "bad-repo",
-        "url": "/nonexistent/path",
-        "path": "/nonexistent/bare/path.git",
-        "default_branch": "main",
-        "registered_at": "2026-01-01T00:00:00Z",
-        "last_synced_at": null,
-    });
-    std::fs::write(
-        &fix.state_path,
-        serde_json::to_string_pretty(&state).unwrap(),
-    )
-    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+        conn.execute(
+            "INSERT INTO repos (name, url, path, default_branch) VALUES ('bad-repo', '/nonexistent/path', '/nonexistent/bare/path.git', 'main')",
+            [],
+        ).unwrap();
+    }
 
     // Init with repo-a (good) + bad-repo (will fail)
     fix.grove_cmd()
@@ -310,13 +303,12 @@ fn init_partial_failure_rollback() {
         "task dir should be cleaned up after partial failure"
     );
 
-    // State should not contain the task
-    let state_after = std::fs::read_to_string(&fix.state_path).unwrap();
-    let state_after: serde_json::Value = serde_json::from_str(&state_after).unwrap();
-    assert!(
-        state_after["tasks"]["TASK-1"].is_null(),
-        "state should not contain partially created task"
-    );
+    // DB should not contain the task
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "db should not contain partially created task");
 }
 
 // ============================================================================
@@ -345,10 +337,12 @@ fn close_existing_task() {
 
     assert!(!task_dir.exists(), "task dir should be removed after close");
 
-    // State should not contain the task
-    let state_contents = std::fs::read_to_string(&fix.state_path).unwrap();
-    let state: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
-    assert!(state["tasks"]["TASK-1"].is_null());
+    // DB should not contain the task
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "task should be removed from db after close");
 }
 
 #[test]

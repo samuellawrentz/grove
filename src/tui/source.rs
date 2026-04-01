@@ -20,7 +20,6 @@ pub(crate) fn fetch_agent_states() -> Result<HashMap<String, AgentState>, GroveE
     agent::read_state_file()
 }
 
-
 /// Capture the visible content of a tmux pane.
 pub(crate) fn fetch_preview(pane_id: &str, verbose: bool) -> Result<String, GroveError> {
     tmux::capture_pane(pane_id, verbose)
@@ -111,10 +110,8 @@ pub(crate) struct DiffState {
 
 impl DiffState {
     pub fn new(repos: Vec<RepoDiff>) -> Self {
-        let mut expanded: Vec<Vec<bool>> = repos
-            .iter()
-            .map(|r| vec![false; r.files.len()])
-            .collect();
+        let mut expanded: Vec<Vec<bool>> =
+            repos.iter().map(|r| vec![false; r.files.len()]).collect();
         // Auto-expand first file
         for repo_expanded in &mut expanded {
             if !repo_expanded.is_empty() {
@@ -321,7 +318,11 @@ impl DiffState {
                 let is_expanded = self.expanded[ri][fi];
                 let arrow = if is_expanded { "▼" } else { "▶" };
                 let is_selected = row == self.cursor;
-                let fs = if is_selected { style_file_sel } else { style_file };
+                let fs = if is_selected {
+                    style_file_sel
+                } else {
+                    style_file
+                };
                 let ss = if is_selected {
                     style_stats.bg(Color::DarkGray)
                 } else {
@@ -337,10 +338,7 @@ impl DiffState {
                 if is_expanded {
                     for (line_count, dl) in file.lines.iter().enumerate() {
                         if line_count >= MAX_LINES_PER_FILE {
-                            lines.push(Line::from(Span::styled(
-                                "    ... truncated",
-                                style_empty,
-                            )));
+                            lines.push(Line::from(Span::styled("    ... truncated", style_empty)));
                             row += 1;
                             break;
                         }
@@ -360,17 +358,23 @@ impl DiffState {
 
                         // Line number gutter
                         let lineno = match &dl.kind {
-                            DiffLineKind::Removed => {
-                                dl.source_line.map(|n| format!("{:>4}      ", n))
-                                    .unwrap_or_else(|| "          ".to_string())
-                            }
-                            DiffLineKind::Added => {
-                                dl.target_line.map(|n| format!("     {:>4} ", n))
-                                    .unwrap_or_else(|| "          ".to_string())
-                            }
+                            DiffLineKind::Removed => dl
+                                .source_line
+                                .map(|n| format!("{:>4}      ", n))
+                                .unwrap_or_else(|| "          ".to_string()),
+                            DiffLineKind::Added => dl
+                                .target_line
+                                .map(|n| format!("     {:>4} ", n))
+                                .unwrap_or_else(|| "          ".to_string()),
                             DiffLineKind::Context => {
-                                let s = dl.source_line.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                                let t = dl.target_line.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                                let s = dl
+                                    .source_line
+                                    .map(|n| format!("{:>4}", n))
+                                    .unwrap_or_else(|| "    ".to_string());
+                                let t = dl
+                                    .target_line
+                                    .map(|n| format!("{:>4}", n))
+                                    .unwrap_or_else(|| "    ".to_string());
                                 format!("{} {} ", s, t)
                             }
                             DiffLineKind::HunkHeader => "          ".to_string(),
@@ -384,7 +388,11 @@ impl DiffState {
                         };
                         spans.push(Span::styled(lineno, gutter_style));
 
-                        let s = if let Some(c) = bg { base_style.bg(c) } else { base_style };
+                        let s = if let Some(c) = bg {
+                            base_style.bg(c)
+                        } else {
+                            base_style
+                        };
                         if matches!(dl.kind, DiffLineKind::HunkHeader) {
                             spans.push(Span::styled(dl.content.clone(), s));
                         } else {
@@ -427,9 +435,7 @@ pub(crate) fn fetch_git_diffs(dir: &Path) -> Result<Vec<RepoDiff>, GroveError> {
 
     for repo in &repos {
         let name = repo.to_string_lossy().to_string();
-        let diff = Command::new("git")
-            .args(["-C", &name, "diff"])
-            .output();
+        let diff = Command::new("git").args(["-C", &name, "diff"]).output();
 
         let files = match diff {
             Ok(d) => {

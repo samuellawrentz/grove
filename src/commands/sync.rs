@@ -2,10 +2,10 @@ use chrono::Utc;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::config::GroveConfig;
+use crate::db::Db;
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
-use crate::state::GroveState;
 
 /// Simple counting semaphore using Mutex + Condvar.
 struct Semaphore {
@@ -46,14 +46,16 @@ struct SyncResult {
 pub fn run(
     repo_name: Option<&str>,
     config: &GroveConfig,
-    state: &mut GroveState,
+    db: &Db,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
+    let all_repos = db.list_repos()?;
+
     let repos_to_sync: Vec<(String, std::path::PathBuf, String)> = if let Some(name) = repo_name {
-        let entry = state
-            .repos
-            .get(name)
+        let entry = all_repos
+            .iter()
+            .find(|r| r.name == name)
             .ok_or_else(|| GroveError::RepoNotRegistered(format!("'{name}' is not registered")))?;
         vec![(
             entry.name.clone(),
@@ -61,21 +63,19 @@ pub fn run(
             entry.default_branch.clone(),
         )]
     } else {
-        if state.repos.is_empty() {
+        if all_repos.is_empty() {
             let data = serde_json::json!({ "results": [] });
             output::success(json_mode, "No repos to sync", data);
             return Ok(());
         }
-        let mut repos: Vec<_> = state
-            .repos
-            .values()
+        all_repos
+            .iter()
             .map(|r| (r.name.clone(), r.path.clone(), r.default_branch.clone()))
-            .collect();
-        repos.sort_by(|a, b| a.0.cmp(&b.0));
-        repos
+            .collect()
     };
 
     let prune = config.git.fetch_prune;
+    let tracked_branches = config.git.tracked_branches.clone();
     let max_parallel = config.max_parallel_syncs;
     let results = Arc::new(Mutex::new(Vec::new()));
     let semaphore = Arc::new(Semaphore::new(max_parallel));
@@ -87,13 +87,21 @@ pub fn run(
             let name = name.clone();
             let path = path.clone();
             let default_branch = default_branch.clone();
+            let tracked_branches = tracked_branches.clone();
             s.spawn(move || {
                 sem.acquire();
                 if !json_mode {
                     eprintln!("Syncing {}...", name);
                 }
-                let result = git::fetch_repo(&path, prune, verbose)
-                    .and_then(|()| git::update_default_branch(&path, &default_branch, verbose));
+                let result = git::fetch_repo(&path, prune, verbose).and_then(|()| {
+                    for branch in &tracked_branches {
+                        git::update_default_branch(&path, branch, verbose)?;
+                    }
+                    if !tracked_branches.iter().any(|b| b == &default_branch) {
+                        git::update_default_branch(&path, &default_branch, verbose)?;
+                    }
+                    Ok(())
+                });
                 let sync_result = match result {
                     Ok(()) => SyncResult {
                         repo: name.clone(),
@@ -112,20 +120,19 @@ pub fn run(
         }
     });
 
-    let results = Arc::try_unwrap(results).expect("arc still shared").into_inner().expect("mutex poisoned");
+    let results = Arc::try_unwrap(results)
+        .expect("arc still shared")
+        .into_inner()
+        .expect("mutex poisoned");
 
     // Update last_synced_at for successful repos
     let now = Utc::now();
     for r in &results {
         if r.ok {
-            if let Some(entry) = state.repos.get_mut(&r.repo) {
-                entry.last_synced_at = Some(now);
-            }
+            db.touch_repo_synced(&r.repo, now)?;
         }
     }
-    state.save()?;
 
-    // Output
     let all_ok = results.iter().all(|r| r.ok);
     let result_data: Vec<serde_json::Value> = results
         .iter()

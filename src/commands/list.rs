@@ -1,25 +1,23 @@
 use crate::agent;
 use crate::config::GroveConfig;
+use crate::db::Db;
 use crate::error::GroveError;
 use crate::output;
-use crate::state::GroveState;
 
 pub fn run(
-    state: &GroveState,
+    db: &Db,
     _config: &GroveConfig,
     json_mode: bool,
     verbose: bool,
 ) -> Result<(), GroveError> {
-    if state.tasks.is_empty() {
+    let tasks = db.list_tasks()?;
+    if tasks.is_empty() {
         let data = serde_json::json!({ "tasks": [] });
         output::success(json_mode, "No active tasks", data);
         return Ok(());
     }
 
     let agent_states = agent::read_state_file().unwrap_or_default();
-
-    let mut tasks: Vec<_> = state.tasks.values().collect();
-    tasks.sort_by(|a, b| a.id.cmp(&b.id));
 
     if json_mode {
         let task_list: Vec<serde_json::Value> = tasks

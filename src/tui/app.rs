@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use crate::agent::AgentFilter;
 use crate::config::GroveConfig;
+use crate::db::{Db, Project};
 use crate::error::GroveError;
-use crate::recents::{self, RecentEntry};
 use crate::tmux;
 
 use super::source::{self, DiffState};
@@ -14,7 +14,7 @@ const TREE_POLL: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarFocus {
     Tree,
-    Recents,
+    Projects,
 }
 
 /// Main application state for the TUI.
@@ -38,8 +38,9 @@ pub(crate) struct App {
     pub diff_state: Option<DiffState>,
     pub default_agent_command: String,
     pub sidebar_focus: SidebarFocus,
-    pub recents: Vec<RecentEntry>,
-    pub recents_cursor: usize,
+    pub db: Db,
+    pub projects: Vec<Project>,
+    pub projects_cursor: usize,
 }
 
 impl App {
@@ -55,6 +56,9 @@ impl App {
         let default_agent_command = GroveConfig::load(None, None, None, None)
             .map(|(c, _)| c.claude_command)
             .unwrap_or_else(|_| "claude".to_string());
+
+        let db = Db::open()?;
+        let projects = db.list_projects().unwrap_or_default();
 
         let mut app = App {
             tree: TreeState {
@@ -80,8 +84,9 @@ impl App {
             diff_state: None,
             default_agent_command,
             sidebar_focus: SidebarFocus::Tree,
-            recents: recents::load(),
-            recents_cursor: 0,
+            db,
+            projects,
+            projects_cursor: 0,
         };
 
         app.refresh_tree();
@@ -97,8 +102,15 @@ impl App {
             source::fetch_agent_states(),
         ) {
             (Ok(panes), Ok(states)) => {
+                let old_group_count = self.tree.groups.len();
                 self.tree.rebuild(&panes, &states, "");
                 self.status_message = None;
+                // Only upsert projects when groups change (avoids writes every 5s tick)
+                if self.tree.groups.len() != old_group_count {
+                    for group in &self.tree.groups {
+                        let _ = self.db.upsert_project(&group.path.to_string_lossy());
+                    }
+                }
             }
             (Err(e), _) | (_, Err(e)) => {
                 self.status_message = Some(format!("Refresh error: {e}"));
@@ -159,18 +171,18 @@ impl App {
         TREE_POLL
     }
 
-    /// Refresh the recents list from disk.
-    pub fn refresh_recents(&mut self) {
-        self.recents = recents::load();
-        if self.recents_cursor >= self.recents.len() && !self.recents.is_empty() {
-            self.recents_cursor = self.recents.len() - 1;
+    /// Refresh the projects list from the database.
+    pub fn refresh_projects(&mut self) {
+        self.projects = self.db.list_projects().unwrap_or_default();
+        if self.projects_cursor >= self.projects.len() {
+            self.projects_cursor = self.projects.len().saturating_sub(1);
         }
     }
 
     /// Called on each tick (timeout expiry) to refresh data.
     pub fn on_tick(&mut self) {
         self.refresh_tree();
-        self.refresh_recents();
+        self.refresh_projects();
         self.refresh_preview();
     }
 }
