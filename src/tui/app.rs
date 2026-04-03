@@ -51,6 +51,7 @@ pub(crate) struct App {
     pub db: Db,
     pub projects: Vec<Project>,
     pub projects_cursor: usize,
+    pub projects_search_filter: Option<String>,
     /// When true, quit after launching a pane (popup mode).
     pub popup: bool,
     pub show_notepad: bool,
@@ -106,6 +107,7 @@ impl App {
             db,
             projects,
             projects_cursor: 0,
+            projects_search_filter: None,
             popup,
             focus: Focus::Sidebar,
             show_notepad: false,
@@ -238,6 +240,24 @@ impl App {
             }
         };
         EditorState::new(Lines::from(content.as_str()))
+    }
+
+    /// Get filtered projects list indices matching the current search filter.
+    pub fn filtered_project_indices(&self) -> Vec<usize> {
+        match &self.projects_search_filter {
+            Some(query) if !query.is_empty() => self
+                .projects
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    let q = query.to_lowercase();
+                    p.name.to_lowercase().contains(&q)
+                        || p.path.to_string_lossy().to_lowercase().contains(&q)
+                })
+                .map(|(i, _)| i)
+                .collect(),
+            _ => (0..self.projects.len()).collect(),
+        }
     }
 
     pub fn save_note(&mut self) {

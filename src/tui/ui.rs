@@ -52,8 +52,8 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Color::DarkGray
     };
     let pane_title = match &app.tree.agent_filter {
-        AgentFilter::All => " Panes [all] ".to_string(),
         AgentFilter::AnyAgent => " Panes [agents] ".to_string(),
+        AgentFilter::Others => " Panes [others] ".to_string(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -80,14 +80,20 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .panes
             .iter()
             .any(|p| app.tree.pane_matches(p, &group.name));
+
+        // Skip groups with no matching panes when filtered
+        if !group_has_matches {
+            row_idx += 1;
+            if group.expanded {
+                row_idx += group.panes.len();
+            }
+            continue;
+        }
+
         let header_style = if focused && row_idx == app.tree.cursor {
             Style::default()
                 .add_modifier(Modifier::BOLD)
                 .bg(Color::DarkGray)
-        } else if !group_has_matches {
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::DarkGray)
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         };
@@ -99,6 +105,13 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
         if group.expanded {
             for pane in &group.panes {
+                let matches = app.tree.pane_matches(pane, &group.name);
+
+                if !matches {
+                    row_idx += 1;
+                    continue;
+                }
+
                 let (icon, icon_color) = match &pane.agent {
                     Some(info) => {
                         let def = AGENT_REGISTRY.iter().find(|d| d.kind == info.kind);
@@ -121,18 +134,13 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     .unwrap_or(".");
                 let label = format!("  {} [{}]", basename, pane.pane_info.current_command);
 
-                let matches = app.tree.pane_matches(pane, &group.name);
                 let style = if focused && row_idx == app.tree.cursor {
                     Style::default().bg(Color::DarkGray)
-                } else if !matches {
-                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default()
                 };
                 let icon_style = if focused && row_idx == app.tree.cursor {
                     Style::default().fg(icon_color).bg(Color::DarkGray)
-                } else if !matches {
-                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(icon_color)
                 };
@@ -195,8 +203,15 @@ fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.projects.is_empty() {
-        let empty = Paragraph::new("No projects yet")
+    let filtered_indices = app.filtered_project_indices();
+
+    if filtered_indices.is_empty() {
+        let msg = if app.projects.is_empty() {
+            "No projects yet"
+        } else {
+            "No matches"
+        };
+        let empty = Paragraph::new(msg)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(ratatui::layout::Alignment::Center);
         f.render_widget(empty, inner);
@@ -211,14 +226,14 @@ fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .map(|g| g.path.to_string_lossy().to_string())
         .collect();
 
-    let lines: Vec<Line> = app
-        .projects
+    let lines: Vec<Line> = filtered_indices
         .iter()
         .enumerate()
-        .map(|(i, project)| {
+        .map(|(display_idx, &real_idx)| {
+            let project = &app.projects[real_idx];
             let is_active = active_paths.contains(&project.path.to_string_lossy().to_string());
             let time = format_relative_time(&project.last_seen);
-            let selected = focused && i == app.projects_cursor;
+            let selected = focused && display_idx == app.projects_cursor;
             let style = if selected {
                 Style::default().bg(Color::DarkGray)
             } else if is_active {
@@ -260,8 +275,8 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let border_style = Style::default().fg(Color::DarkGray);
 
     let filter_label = match &app.tree.agent_filter {
-        AgentFilter::All => " [all] ".to_string(),
         AgentFilter::AnyAgent => " [agents] ".to_string(),
+        AgentFilter::Others => " [others] ".to_string(),
     };
     let title = if app.diff_mode {
         " Git Diff ".to_string()

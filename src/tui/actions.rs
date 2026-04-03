@@ -67,48 +67,96 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
 
     // Search input mode
     if let Some(ref mut query) = app.search_input {
-        match key.code {
-            KeyCode::Enter => {
-                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                    let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-                    app.should_quit = app.popup;
+        match app.sidebar_focus {
+            SidebarFocus::Tree => match key.code {
+                KeyCode::Enter => {
+                    if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
+                        let _ = tmux::switch_to_pane(&pane_id, app.verbose);
+                        app.should_quit = app.popup;
+                    }
+                    app.search_input = None;
+                    app.tree.search_filter = None;
                 }
-                app.search_input = None;
-                app.tree.search_filter = None;
-            }
-            KeyCode::Esc => {
-                app.search_input = None;
-                app.tree.search_filter = None;
-            }
-            KeyCode::Down => {
-                app.tree.move_cursor_to_pane(true);
-                update_scroll(app);
-                app.refresh_preview();
-            }
-            KeyCode::Up => {
-                app.tree.move_cursor_to_pane(false);
-                update_scroll(app);
-                app.refresh_preview();
-            }
-            KeyCode::Char(c) => {
-                query.push(c);
-                app.tree.search_filter = Some(query.clone());
-                app.tree.jump_first_pane();
-                update_scroll(app);
-                app.refresh_preview();
-            }
-            KeyCode::Backspace => {
-                query.pop();
-                app.tree.search_filter = if query.is_empty() {
-                    None
-                } else {
-                    Some(query.clone())
-                };
-                app.tree.jump_first_pane();
-                update_scroll(app);
-                app.refresh_preview();
-            }
-            _ => {}
+                KeyCode::Esc => {
+                    app.search_input = None;
+                    app.tree.search_filter = None;
+                }
+                KeyCode::Down => {
+                    app.tree.move_cursor_to_pane(true);
+                    update_scroll(app);
+                    app.refresh_preview();
+                }
+                KeyCode::Up => {
+                    app.tree.move_cursor_to_pane(false);
+                    update_scroll(app);
+                    app.refresh_preview();
+                }
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    app.tree.search_filter = Some(query.clone());
+                    app.tree.jump_first_pane();
+                    update_scroll(app);
+                    app.refresh_preview();
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    app.tree.search_filter = if query.is_empty() {
+                        None
+                    } else {
+                        Some(query.clone())
+                    };
+                    app.tree.jump_first_pane();
+                    update_scroll(app);
+                    app.refresh_preview();
+                }
+                _ => {}
+            },
+            SidebarFocus::Projects => match key.code {
+                KeyCode::Enter => {
+                    let indices = app.filtered_project_indices();
+                    if !indices.is_empty() {
+                        let real_idx = indices[app.projects_cursor.min(indices.len() - 1)];
+                        let dir = app.projects[real_idx]
+                            .path
+                            .to_string_lossy()
+                            .to_string();
+                        let cmd = format!("{} -c", app.default_agent_command);
+                        app.search_input = None;
+                        app.projects_search_filter = None;
+                        launch_in_new_window(app, &dir, Some(&cmd));
+                    }
+                    app.search_input = None;
+                    app.projects_search_filter = None;
+                }
+                KeyCode::Esc => {
+                    app.search_input = None;
+                    app.projects_search_filter = None;
+                }
+                KeyCode::Down => {
+                    let max = app.filtered_project_indices().len();
+                    if app.projects_cursor + 1 < max {
+                        app.projects_cursor += 1;
+                    }
+                }
+                KeyCode::Up => {
+                    app.projects_cursor = app.projects_cursor.saturating_sub(1);
+                }
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    app.projects_search_filter = Some(query.clone());
+                    app.projects_cursor = 0;
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    app.projects_search_filter = if query.is_empty() {
+                        None
+                    } else {
+                        Some(query.clone())
+                    };
+                    app.projects_cursor = 0;
+                }
+                _ => {}
+            },
         }
         return;
     }
@@ -230,8 +278,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.tree.agent_filter = match &app.tree.agent_filter {
-                AgentFilter::All => AgentFilter::AnyAgent,
-                AgentFilter::AnyAgent => AgentFilter::All,
+                AgentFilter::AnyAgent => AgentFilter::Others,
+                AgentFilter::Others => AgentFilter::AnyAgent,
             };
             app.tree.jump_first_pane();
             update_scroll(app);
@@ -419,13 +467,24 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
 fn handle_projects_key(app: &mut App, key: KeyEvent) {
     use crossterm::event::KeyCode;
 
-    if app.projects.is_empty() {
+    let indices = app.filtered_project_indices();
+    if indices.is_empty() {
         return;
     }
 
+    // Resolve the real project index from the display cursor
+    let real_idx = |app: &App| {
+        let idxs = app.filtered_project_indices();
+        if idxs.is_empty() {
+            None
+        } else {
+            Some(idxs[app.projects_cursor.min(idxs.len() - 1)])
+        }
+    };
+
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
-            if app.projects_cursor + 1 < app.projects.len() {
+            if app.projects_cursor + 1 < indices.len() {
                 app.projects_cursor += 1;
             }
         }
@@ -433,43 +492,41 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) {
             app.projects_cursor = app.projects_cursor.saturating_sub(1);
         }
         KeyCode::Char('c') | KeyCode::Enter => {
-            let dir = app.projects[app.projects_cursor]
-                .path
-                .to_string_lossy()
-                .to_string();
-            let cmd = format!("{} -c", app.default_agent_command);
-            launch_in_new_window(app, &dir, Some(&cmd));
+            if let Some(idx) = real_idx(app) {
+                let dir = app.projects[idx].path.to_string_lossy().to_string();
+                let cmd = format!("{} -c", app.default_agent_command);
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
         }
         KeyCode::Char('n') => {
-            let dir = app.projects[app.projects_cursor]
-                .path
-                .to_string_lossy()
-                .to_string();
-            let cmd = app.default_agent_command.clone();
-            launch_in_new_window(app, &dir, Some(&cmd));
+            if let Some(idx) = real_idx(app) {
+                let dir = app.projects[idx].path.to_string_lossy().to_string();
+                let cmd = app.default_agent_command.clone();
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
         }
         KeyCode::Char('t') => {
-            let dir = app.projects[app.projects_cursor]
-                .path
-                .to_string_lossy()
-                .to_string();
-            launch_in_new_window(app, &dir, None);
+            if let Some(idx) = real_idx(app) {
+                let dir = app.projects[idx].path.to_string_lossy().to_string();
+                launch_in_new_window(app, &dir, None);
+            }
         }
         KeyCode::Char('x') => {
-            let path = app.projects[app.projects_cursor]
-                .path
-                .to_string_lossy()
-                .to_string();
-            let _ = app.db.delete_project(&path);
-            app.refresh_projects();
+            if let Some(idx) = real_idx(app) {
+                let path = app.projects[idx].path.to_string_lossy().to_string();
+                let _ = app.db.delete_project(&path);
+                app.refresh_projects();
+                let new_len = app.filtered_project_indices().len();
+                if app.projects_cursor >= new_len {
+                    app.projects_cursor = new_len.saturating_sub(1);
+                }
+            }
         }
         KeyCode::Char('g') => {
             app.projects_cursor = 0;
         }
         KeyCode::Char('G') => {
-            if !app.projects.is_empty() {
-                app.projects_cursor = app.projects.len() - 1;
-            }
+            app.projects_cursor = indices.len().saturating_sub(1);
         }
         _ => {}
     }
@@ -488,10 +545,14 @@ fn selected_target_cwd(app: &App) -> Option<(String, String)> {
             (target, cwd)
         })
     } else if app.sidebar_focus == SidebarFocus::Projects {
-        app.projects.get(app.projects_cursor).map(|proj| {
-            let path = proj.path.to_string_lossy().to_string();
-            ("new-window".to_string(), path)
-        })
+        let indices = app.filtered_project_indices();
+        indices
+            .get(app.projects_cursor)
+            .and_then(|&idx| app.projects.get(idx))
+            .map(|proj| {
+                let path = proj.path.to_string_lossy().to_string();
+                ("new-window".to_string(), path)
+            })
     } else {
         None
     }

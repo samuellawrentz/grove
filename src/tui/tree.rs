@@ -98,7 +98,7 @@ impl TreeState {
             cursor: 0,
             scroll_offset: 0,
             search_filter: None,
-            agent_filter: AgentFilter::All,
+            agent_filter: AgentFilter::AnyAgent,
         }
     }
 
@@ -210,8 +210,8 @@ impl TreeState {
             true
         } else {
             match &self.agent_filter {
-                AgentFilter::All => true,
                 AgentFilter::AnyAgent => pane.agent.is_some(),
+                AgentFilter::Others => pane.agent.is_none(),
             }
         };
         search_ok && agent_ok

@@ -56,8 +56,8 @@ impl fmt::Display for AgentState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum AgentFilter {
-    All,
     AnyAgent,
+    Others,
 }
 
 #[derive(Debug, Clone)]
