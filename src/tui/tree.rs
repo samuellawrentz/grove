@@ -762,4 +762,106 @@ mod tests {
         assert_eq!(group.panes[1].pane_info.pane_id, "%2"); // main win 1
         assert_eq!(group.panes[2].pane_info.pane_id, "%3"); // work win 2
     }
+
+    fn pane_with_activity(
+        id: &str,
+        session: &str,
+        path: &str,
+        cmd: &str,
+        activity: u64,
+    ) -> PaneInfo {
+        let mut p = make_pane(id, session, 0, path, cmd);
+        p.activity = activity;
+        p
+    }
+
+    #[test]
+    fn test_groups_waiting_first() {
+        // Group A: claude with no waiting state, high activity
+        // Group B: claude in waiting state, lower activity
+        // Waiting should win despite lower activity.
+        let panes = vec![
+            pane_with_activity("%1", "main", "/opt/a", "claude", 1000),
+            pane_with_activity("%2", "main", "/opt/b", "claude", 10),
+        ];
+        let mut states = HashMap::new();
+        states.insert("%2".to_string(), AgentState::Waiting);
+
+        let recorded = HashMap::new();
+        let groups = build_groups(&panes, &states, &recorded, None, "", &[]);
+
+        assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
+        assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1");
+    }
+
+    #[test]
+    fn test_groups_current_session_beats_activity() {
+        // Two groups, no waiting. Group with pane in "current" session wins
+        // even if the other group has higher activity.
+        let panes = vec![
+            pane_with_activity("%1", "other", "/opt/a", "zsh", 9999),
+            pane_with_activity("%2", "main", "/opt/b", "zsh", 1),
+        ];
+        let states = HashMap::new();
+        let recorded = HashMap::new();
+        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+
+        assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
+        assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1");
+    }
+
+    #[test]
+    fn test_groups_waiting_beats_current_session() {
+        // Waiting in non-current session still outranks current-session group.
+        let panes = vec![
+            pane_with_activity("%1", "main", "/opt/a", "claude", 5000),
+            pane_with_activity("%2", "other", "/opt/b", "claude", 1),
+        ];
+        let mut states = HashMap::new();
+        states.insert("%2".to_string(), AgentState::Waiting);
+
+        let recorded = HashMap::new();
+        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+
+        assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2"); // waiting
+        assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1"); // current session
+    }
+
+    #[test]
+    fn test_panes_within_group_waiting_first() {
+        // All panes in same group: waiting pane should float to top regardless
+        // of activity or current-session membership.
+        let panes = vec![
+            pane_with_activity("%1", "main", "/opt/x", "claude", 5000),
+            pane_with_activity("%2", "main", "/opt/x", "claude", 10),
+            pane_with_activity("%3", "main", "/opt/x", "claude", 100),
+        ];
+        let mut states = HashMap::new();
+        states.insert("%2".to_string(), AgentState::Waiting);
+
+        let recorded = HashMap::new();
+        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+
+        assert_eq!(groups.len(), 1);
+        let g = &groups[0];
+        assert_eq!(g.panes[0].pane_info.pane_id, "%2"); // waiting
+        assert_eq!(g.panes[1].pane_info.pane_id, "%1"); // higher activity
+        assert_eq!(g.panes[2].pane_info.pane_id, "%3"); // lower activity
+    }
+
+    #[test]
+    fn test_panes_within_group_current_session_beats_activity() {
+        // Within one group, panes in the current session beat higher-activity
+        // panes in other sessions.
+        let panes = vec![
+            pane_with_activity("%1", "other", "/opt/x", "zsh", 9999),
+            pane_with_activity("%2", "main", "/opt/x", "zsh", 1),
+        ];
+        let states = HashMap::new();
+        let recorded = HashMap::new();
+        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+
+        assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
+        assert_eq!(groups[0].panes[1].pane_info.pane_id, "%1");
+    }
 }
