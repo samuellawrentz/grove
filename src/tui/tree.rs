@@ -93,7 +93,7 @@ impl TreeState {
         exclude_pane_id: &str,
     ) -> Self {
         let recorded = HashMap::new();
-        let groups = build_groups(panes, agent_states, &recorded, exclude_pane_id, &[]);
+        let groups = build_groups(panes, agent_states, &recorded, None, exclude_pane_id, &[]);
         TreeState {
             groups,
             cursor: 0,
@@ -109,6 +109,7 @@ impl TreeState {
         panes: &[PaneInfo],
         agent_states: &HashMap<String, AgentState>,
         recorded_kinds: &HashMap<String, AgentKind>,
+        current_session: Option<&str>,
         exclude_pane_id: &str,
     ) {
         let old_expanded: Vec<(String, bool)> = self
@@ -116,7 +117,14 @@ impl TreeState {
             .iter()
             .map(|g| (g.name.clone(), g.expanded))
             .collect();
-        self.groups = build_groups(panes, agent_states, recorded_kinds, exclude_pane_id, &old_expanded);
+        self.groups = build_groups(
+            panes,
+            agent_states,
+            recorded_kinds,
+            current_session,
+            exclude_pane_id,
+            &old_expanded,
+        );
         // Clamp cursor to valid range
         let count = self.visible_count();
         if count == 0 {
@@ -416,10 +424,18 @@ pub(crate) fn shorten_path(path: &std::path::Path) -> String {
     }
 }
 
+fn is_waiting(p: &TreePane) -> bool {
+    p.agent
+        .as_ref()
+        .map(|a| matches!(a.state, AgentState::Waiting))
+        .unwrap_or(false)
+}
+
 fn build_groups(
     panes: &[PaneInfo],
     agent_states: &HashMap<String, AgentState>,
     recorded_kinds: &HashMap<String, AgentKind>,
+    current_session: Option<&str>,
     exclude_pane_id: &str,
     old_expanded: &[(String, bool)],
 ) -> Vec<TreeGroup> {
@@ -452,11 +468,17 @@ fn build_groups(
         .into_iter()
         .map(|(path, mut panes)| {
             let name = shorten_path(&path);
-            // Sort panes by activity descending (most recent first), then session:window as tiebreaker
+            // Tiered sort: waiting first, then panes in current tmux session,
+            // then by activity desc; session:window as final tiebreaker.
             panes.sort_by(|a, b| {
-                b.pane_info
-                    .activity
-                    .cmp(&a.pane_info.activity)
+                let a_wait = is_waiting(a);
+                let b_wait = is_waiting(b);
+                let a_cur = current_session.is_some_and(|s| a.pane_info.session_name == s);
+                let b_cur = current_session.is_some_and(|s| b.pane_info.session_name == s);
+                b_wait
+                    .cmp(&a_wait)
+                    .then(b_cur.cmp(&a_cur))
+                    .then(b.pane_info.activity.cmp(&a.pane_info.activity))
                     .then(a.pane_info.session_name.cmp(&b.pane_info.session_name))
                     .then(a.pane_info.window_index.cmp(&b.pane_info.window_index))
             });
@@ -477,21 +499,23 @@ fn build_groups(
         })
         .collect();
 
-    // Sort groups by most recent pane activity (most active first), alphabetical tiebreaker
+    // Tiered group sort: groups with a waiting pane first, then groups
+    // containing a pane in the current tmux session, then by most recent
+    // pane activity, alphabetical tiebreaker.
     groups.sort_by(|a, b| {
-        let a_max = a
-            .panes
-            .iter()
-            .map(|p| p.pane_info.activity)
-            .max()
-            .unwrap_or(0);
-        let b_max = b
-            .panes
-            .iter()
-            .map(|p| p.pane_info.activity)
-            .max()
-            .unwrap_or(0);
-        b_max.cmp(&a_max).then(a.name.cmp(&b.name))
+        let a_wait = a.panes.iter().any(is_waiting);
+        let b_wait = b.panes.iter().any(is_waiting);
+        let a_cur = current_session
+            .is_some_and(|s| a.panes.iter().any(|p| p.pane_info.session_name == s));
+        let b_cur = current_session
+            .is_some_and(|s| b.panes.iter().any(|p| p.pane_info.session_name == s));
+        let a_max = a.panes.iter().map(|p| p.pane_info.activity).max().unwrap_or(0);
+        let b_max = b.panes.iter().map(|p| p.pane_info.activity).max().unwrap_or(0);
+        b_wait
+            .cmp(&a_wait)
+            .then(b_cur.cmp(&a_cur))
+            .then(b_max.cmp(&a_max))
+            .then(a.name.cmp(&b.name))
     });
     groups
 }

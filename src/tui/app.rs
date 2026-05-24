@@ -132,8 +132,10 @@ impl App {
         ) {
             (Ok(panes), Ok(states)) => {
                 let recorded = source::fetch_recorded_agents(&self.db);
+                let current_session = crate::tmux::current_session(self.verbose).ok();
                 let old_group_count = self.tree.groups.len();
-                self.tree.rebuild(&panes, &states, &recorded, "");
+                self.tree
+                    .rebuild(&panes, &states, &recorded, current_session.as_deref(), "");
                 self.status_message = None;
                 // Only upsert projects when groups change (avoids writes every 5s tick)
                 if self.tree.groups.len() != old_group_count {
