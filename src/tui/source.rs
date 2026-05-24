@@ -6,7 +6,8 @@ use std::str::FromStr;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::agent::{self, AgentState};
+use crate::agent::{self, AgentKind, AgentState};
+use crate::db::Db;
 use crate::error::GroveError;
 use crate::tmux::{self, PaneInfo};
 
@@ -18,6 +19,16 @@ pub(crate) fn fetch_panes(verbose: bool) -> Result<Vec<PaneInfo>, GroveError> {
 /// Fetch agent states from the external hook state file.
 pub(crate) fn fetch_agent_states() -> Result<HashMap<String, AgentState>, GroveError> {
     agent::read_state_file()
+}
+
+/// Load pane_id → AgentKind for panes grove launched (authoritative).
+pub(crate) fn fetch_recorded_agents(db: &Db) -> HashMap<String, AgentKind> {
+    let Ok(raw) = db.list_pane_agents() else {
+        return HashMap::new();
+    };
+    raw.into_iter()
+        .filter_map(|(pane_id, kind)| AgentKind::parse(&kind).map(|k| (pane_id, k)))
+        .collect()
 }
 
 /// Capture the visible content of a tmux pane.

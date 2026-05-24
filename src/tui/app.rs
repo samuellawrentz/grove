@@ -131,8 +131,9 @@ impl App {
             source::fetch_agent_states(),
         ) {
             (Ok(panes), Ok(states)) => {
+                let recorded = source::fetch_recorded_agents(&self.db);
                 let old_group_count = self.tree.groups.len();
-                self.tree.rebuild(&panes, &states, "");
+                self.tree.rebuild(&panes, &states, &recorded, "");
                 self.status_message = None;
                 // Only upsert projects when groups change (avoids writes every 5s tick)
                 if self.tree.groups.len() != old_group_count {

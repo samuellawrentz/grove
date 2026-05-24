@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,26 @@ impl fmt::Display for AgentKind {
             Self::Codex => write!(f, "codex"),
             Self::Cursor => write!(f, "cursor"),
         }
+    }
+}
+
+impl AgentKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "claude" => Some(Self::Claude),
+            "opencode" => Some(Self::OpenCode),
+            "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            _ => None,
+        }
+    }
+
+    /// Match a command line (binary path or argv) against the registry.
+    pub fn from_command(cmd: &str) -> Option<Self> {
+        AGENT_REGISTRY
+            .iter()
+            .find(|def| def.command_names.iter().any(|n| cmd.contains(n)))
+            .map(|d| d.kind)
     }
 }
 
@@ -241,24 +262,116 @@ pub fn scrape_pane_state(pane_id: &str, def: &AgentDef, verbose: bool) -> AgentS
     }
 }
 
-/// Detect agent + state from state file data + command name.
+/// Cache of resolved agent kinds keyed by pane_id. Invalidated when the pane's
+/// pid changes (which means the pane was respawned or the agent process exited).
+#[derive(Clone, Copy)]
+struct CachedKind {
+    pane_pid: u32,
+    kind: AgentKind,
+}
+
+static TREE_CACHE: LazyLock<Mutex<HashMap<String, CachedKind>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Walk the pane's process tree (via `pgrep -P`) and inspect each descendant's
+/// argv (via `ps -o command=`) for an agent binary. Result is cached per pane.
+pub fn detect_via_process_tree(pane: &PaneInfo) -> Option<AgentKind> {
+    {
+        let cache = TREE_CACHE.lock().unwrap();
+        if let Some(c) = cache.get(&pane.pane_id) {
+            if c.pane_pid == pane.pid {
+                return Some(c.kind);
+            }
+        }
+    }
+
+    let mut frontier = vec![pane.pid];
+    let mut seen = Vec::with_capacity(8);
+    while let Some(pid) = frontier.pop() {
+        if seen.contains(&pid) {
+            continue;
+        }
+        seen.push(pid);
+
+        if let Some(cmd) = process_command(pid) {
+            if let Some(kind) = AgentKind::from_command(&cmd) {
+                let mut cache = TREE_CACHE.lock().unwrap();
+                cache.insert(
+                    pane.pane_id.clone(),
+                    CachedKind { pane_pid: pane.pid, kind },
+                );
+                return Some(kind);
+            }
+        }
+
+        for child in child_pids(pid) {
+            frontier.push(child);
+        }
+    }
+    None
+}
+
+fn child_pids(parent: u32) -> Vec<u32> {
+    let Ok(out) = Command::new("pgrep").args(["-P", &parent.to_string()]).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn process_command(pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Detect agent + state, in priority order:
+///   1. external Claude state file (pane_id → state)
+///   2. grove-recorded kind from DB (pane_id → kind, set at launch)
+///   3. tmux `current_command` / `start_command` substring match
+///   4. process-tree walk (e.g. `cursor` running as a `node` subprocess)
 pub fn detect_agent_in_pane(
     pane: &PaneInfo,
     state_file_states: &HashMap<String, AgentState>,
+    recorded_kinds: &HashMap<String, AgentKind>,
 ) -> Option<AgentInfo> {
-    // 1. Check state file first (Claude)
+    // 1. State file (Claude hook)
     if let Some(state) = state_file_states.get(&pane.pane_id) {
         return Some(AgentInfo {
             kind: AgentKind::Claude,
             state: state.clone(),
         });
     }
-    // 2. Check command name against registry
+    // 2. Grove-recorded kind (authoritative for panes grove launched)
+    if let Some(kind) = recorded_kinds.get(&pane.pane_id) {
+        return Some(AgentInfo {
+            kind: *kind,
+            state: AgentState::Active,
+        });
+    }
+    // 3. tmux command-name substring match
     if let Some(def) = identify_agent(pane) {
-        let state = AgentState::Active; // will be refined by scraping later
         return Some(AgentInfo {
             kind: def.kind,
-            state,
+            state: AgentState::Active,
+        });
+    }
+    // 4. Process-tree fallback
+    if let Some(kind) = detect_via_process_tree(pane) {
+        return Some(AgentInfo {
+            kind,
+            state: AgentState::Active,
         });
     }
     None

@@ -115,6 +115,46 @@ impl Db {
             self.conn.execute_batch(SCHEMA_V2)?;
             self.conn.pragma_update(None, "user_version", 2)?;
         }
+        if version < 3 {
+            self.conn.execute_batch(SCHEMA_V3)?;
+            self.conn.pragma_update(None, "user_version", 3)?;
+        }
+        Ok(())
+    }
+
+    // ── Pane agents ───────────────────────────────────────────────────────────
+    // Authoritative record of agent kind for panes launched by grove.
+
+    pub fn record_pane_agent(&self, pane_id: &str, kind: &str) -> Result<(), GroveError> {
+        self.conn.execute(
+            "INSERT INTO pane_agents (pane_id, agent_kind) VALUES (?1, ?2)
+             ON CONFLICT(pane_id) DO UPDATE SET
+               agent_kind  = excluded.agent_kind,
+               launched_at = datetime('now')",
+            rusqlite::params![pane_id, kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pane_agents(&self) -> Result<std::collections::HashMap<String, String>, GroveError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pane_id, agent_kind FROM pane_agents")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for r in rows {
+            let (k, v) = r.map_err(|e| GroveError::Database(e.to_string()))?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_pane_agent(&self, pane_id: &str) -> Result<(), GroveError> {
+        self.conn
+            .execute("DELETE FROM pane_agents WHERE pane_id = ?1", [pane_id])?;
         Ok(())
     }
 
@@ -539,6 +579,14 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 ";
 
+const SCHEMA_V3: &str = "
+CREATE TABLE IF NOT EXISTS pane_agents (
+    pane_id     TEXT PRIMARY KEY,
+    agent_kind  TEXT NOT NULL,
+    launched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,7 +607,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]

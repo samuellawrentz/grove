@@ -218,7 +218,10 @@ pub fn run(
             }
         } else {
             match create_tmux_window(task_id, &task_dir, opts, config, verbose) {
-                Ok((window, pane)) => {
+                Ok((window, pane, launched_agent)) => {
+                    if let Some(kind) = launched_agent {
+                        let _ = db.record_pane_agent(&pane, &kind.to_string());
+                    }
                     tmux_window = Some(window);
                     pane_id = Some(pane);
                 }
@@ -273,7 +276,7 @@ fn create_tmux_window(
     opts: &InitOptions,
     config: &GroveConfig,
     verbose: bool,
-) -> Result<(String, String), GroveError> {
+) -> Result<(String, String, Option<agent::AgentKind>), GroveError> {
     let session = tmux::current_session(verbose)?;
     let window_name = format!("{}-{}", config.tmux.session_prefix, task_id);
     let window_target = format!("{session}:{window_name}");
@@ -288,11 +291,13 @@ fn create_tmux_window(
 
     let pane_id = tmux::get_pane_id(&window_target, verbose)?;
 
+    let mut launched_kind: Option<agent::AgentKind> = None;
     if !opts.no_claude && config.auto_launch_claude {
         let agent_name = opts.agent.unwrap_or("claude");
         let cmd = config.resolved_agent_command(agent_name);
         agent::launch_in_pane(&window_target, &cmd, verbose)?;
+        launched_kind = agent::AgentKind::parse(agent_name).or_else(|| agent::AgentKind::from_command(&cmd));
     }
 
-    Ok((window_target, pane_id))
+    Ok((window_target, pane_id, launched_kind))
 }

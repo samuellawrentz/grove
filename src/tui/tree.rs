@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::agent::{detect_agent_in_pane, AgentFilter, AgentInfo, AgentState};
+use crate::agent::{detect_agent_in_pane, AgentFilter, AgentInfo, AgentKind, AgentState};
 use crate::tmux::PaneInfo;
 
 static PROJECT_ROOT_CACHE: Mutex<Option<HashMap<PathBuf, PathBuf>>> = Mutex::new(None);
@@ -92,7 +92,8 @@ impl TreeState {
         agent_states: &HashMap<String, AgentState>,
         exclude_pane_id: &str,
     ) -> Self {
-        let groups = build_groups(panes, agent_states, exclude_pane_id, &[]);
+        let recorded = HashMap::new();
+        let groups = build_groups(panes, agent_states, &recorded, exclude_pane_id, &[]);
         TreeState {
             groups,
             cursor: 0,
@@ -107,6 +108,7 @@ impl TreeState {
         &mut self,
         panes: &[PaneInfo],
         agent_states: &HashMap<String, AgentState>,
+        recorded_kinds: &HashMap<String, AgentKind>,
         exclude_pane_id: &str,
     ) {
         let old_expanded: Vec<(String, bool)> = self
@@ -114,7 +116,7 @@ impl TreeState {
             .iter()
             .map(|g| (g.name.clone(), g.expanded))
             .collect();
-        self.groups = build_groups(panes, agent_states, exclude_pane_id, &old_expanded);
+        self.groups = build_groups(panes, agent_states, recorded_kinds, exclude_pane_id, &old_expanded);
         // Clamp cursor to valid range
         let count = self.visible_count();
         if count == 0 {
@@ -417,6 +419,7 @@ pub(crate) fn shorten_path(path: &std::path::Path) -> String {
 fn build_groups(
     panes: &[PaneInfo],
     agent_states: &HashMap<String, AgentState>,
+    recorded_kinds: &HashMap<String, AgentKind>,
     exclude_pane_id: &str,
     old_expanded: &[(String, bool)],
 ) -> Vec<TreeGroup> {
@@ -434,7 +437,7 @@ fn build_groups(
             continue;
         }
 
-        let agent = detect_agent_in_pane(pane, agent_states);
+        let agent = detect_agent_in_pane(pane, agent_states, recorded_kinds);
 
         let tree_pane = TreePane {
             pane_info: pane.clone(),
