@@ -134,8 +134,34 @@ pub fn update_default_branch(
     }
 }
 
+/// Returns true if a local branch already exists in the bare repo.
+pub fn branch_exists(bare_path: &Path, branch: &str, verbose: bool) -> bool {
+    run_git(
+        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        Some(bare_path),
+        verbose,
+    )
+    .is_ok()
+}
+
+/// Returns true if a remote-tracking branch origin/<branch> exists in the bare repo.
+pub fn branch_exists_remote(bare_path: &Path, branch: &str, verbose: bool) -> bool {
+    run_git(
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/remotes/origin/{branch}"),
+        ],
+        Some(bare_path),
+        verbose,
+    )
+    .is_ok()
+}
+
 /// Create a worktree from a bare repo.
-/// Runs `git worktree add -b <branch> <worktree_path> <base_branch>`.
+/// If `branch` already exists locally, checks it out:
+/// `git worktree add <worktree_path> <branch>`.
+/// Otherwise creates it: `git worktree add -b <branch> <worktree_path> <base_branch>`.
 /// Sets upstream tracking to origin/<base_branch>.
 pub fn create_worktree(
     bare_path: &Path,
@@ -148,14 +174,29 @@ pub fn create_worktree(
         .to_str()
         .ok_or_else(|| GroveError::General("invalid worktree path".to_string()))?;
 
-    run_git(
-        &["worktree", "add", "-b", branch, wt_str, base_branch],
-        Some(bare_path),
-        verbose,
-    )?;
+    if branch_exists(bare_path, branch, verbose) {
+        run_git(
+            &["worktree", "add", wt_str, branch],
+            Some(bare_path),
+            verbose,
+        )?;
+    } else {
+        run_git(
+            &["worktree", "add", "-b", branch, wt_str, base_branch],
+            Some(bare_path),
+            verbose,
+        )?;
+    }
 
-    // Set upstream tracking so `git pull` works in the worktree
-    let remote_branch = format!("origin/{base_branch}");
+    // Set upstream tracking so `git pull` works in the worktree.
+    // Prefer the branch's own remote (origin/<branch>) when it exists,
+    // falling back to origin/<base_branch> for freshly created branches.
+    let own_remote = format!("origin/{branch}");
+    let remote_branch = if branch_exists_remote(bare_path, branch, verbose) {
+        own_remote
+    } else {
+        format!("origin/{base_branch}")
+    };
     let _ = run_git(
         &["branch", "--set-upstream-to", &remote_branch, branch],
         Some(bare_path),

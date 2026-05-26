@@ -202,6 +202,41 @@ fn init_idempotent_same_repos() {
 }
 
 #[test]
+fn init_reuses_preexisting_branch() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    // Simulate a branch that already exists in the bare clone (e.g. fetched
+    // from origin) before the task is created.
+    std::process::Command::new("git")
+        .args(["branch", "feature-x", "HEAD"])
+        .current_dir(&bare)
+        .output()
+        .expect("failed to create branch");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // init with --branch matching the existing branch must check it out,
+    // not fail with "a branch named 'feature-x' already exists".
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo", "--branch", "feature-x"])
+        .assert()
+        .success();
+
+    // Worktree is on the reused branch.
+    let wt = fix.tasks_dir.join("TASK-1").join("myrepo");
+    let head = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&wt)
+        .output()
+        .expect("failed to read branch");
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feature-x");
+}
+
+#[test]
 fn init_conflict_different_repos() {
     let fix = TestFixture::new();
     let bare_a = fix.create_bare_repo("repo-a");
