@@ -615,12 +615,14 @@ mod tests {
 
     #[test]
     fn test_root_path_group_name() {
-        let panes = vec![make_pane("%1", "main", 0, "/tmp", "zsh")];
+        // Use a non-existent single-component path so canonicalize() falls back to
+        // the literal path (avoids platform symlink resolution like /tmp → /private/tmp).
+        let panes = vec![make_pane("%1", "main", 0, "/grove-nogit-xyz", "zsh")];
         let states = HashMap::new();
         let tree = TreeState::build(&panes, &states, "");
 
-        // /tmp has no git root → groups by /tmp itself → shorten_path("/tmp") = "tmp"
-        assert_eq!(tree.groups[0].name, "tmp");
+        // No git root → groups by the path itself → shorten_path = last component.
+        assert_eq!(tree.groups[0].name, "grove-nogit-xyz");
     }
 
     #[test]
@@ -726,7 +728,8 @@ mod tests {
         assert!(!tree.groups[0].expanded);
 
         // Rebuild with same data
-        tree.rebuild(&panes, &states, "");
+        let recorded = HashMap::new();
+        tree.rebuild(&panes, &states, &recorded, None, "");
 
         // First group should still be collapsed
         assert!(!tree.groups[0].expanded);
