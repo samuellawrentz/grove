@@ -68,7 +68,8 @@ pub fn run(target: Option<&str>) -> Result<(), GroveError> {
 
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(edited.as_bytes())
+            stdin
+                .write_all(edited.as_bytes())
                 .map_err(|e| GroveError::General(format!("failed to write to tmux: {e}")))?;
         } // stdin dropped here, closes pipe
 

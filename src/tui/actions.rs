@@ -116,10 +116,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                     let indices = app.filtered_project_indices();
                     if !indices.is_empty() {
                         let real_idx = indices[app.projects_cursor.min(indices.len() - 1)];
-                        let dir = app.projects[real_idx]
-                            .path
-                            .to_string_lossy()
-                            .to_string();
+                        let dir = app.projects[real_idx].path.to_string_lossy().to_string();
                         let cmd = format!("{} -c", app.default_agent_command);
                         app.search_input = None;
                         app.projects_search_filter = None;

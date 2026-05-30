@@ -104,9 +104,9 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<(), GroveError> {
-        let version: u32 =
-            self.conn
-                .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let version: u32 = self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version < 1 {
             self.conn.execute_batch(SCHEMA_V1)?;
             self.conn.pragma_update(None, "user_version", 1)?;
@@ -136,7 +136,9 @@ impl Db {
         Ok(())
     }
 
-    pub fn list_pane_agents(&self) -> Result<std::collections::HashMap<String, String>, GroveError> {
+    pub fn list_pane_agents(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, GroveError> {
         let mut stmt = self
             .conn
             .prepare("SELECT pane_id, agent_kind FROM pane_agents")?;
@@ -259,7 +261,10 @@ impl Db {
                     name: repo["name"].as_str().unwrap_or_default().to_string(),
                     url: repo["url"].as_str().unwrap_or_default().to_string(),
                     path: PathBuf::from(repo["path"].as_str().unwrap_or_default()),
-                    default_branch: repo["default_branch"].as_str().unwrap_or("main").to_string(),
+                    default_branch: repo["default_branch"]
+                        .as_str()
+                        .unwrap_or("main")
+                        .to_string(),
                     registered_at: repo["registered_at"]
                         .as_str()
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -424,7 +429,8 @@ impl Db {
                    pane_id     = excluded.pane_id",
                 rusqlite::params![task.id, path, created_at, task.tmux_window, task.pane_id],
             )?;
-            self.conn.execute("DELETE FROM task_repos WHERE task_id = ?1", [&task.id])?;
+            self.conn
+                .execute("DELETE FROM task_repos WHERE task_id = ?1", [&task.id])?;
             for tr in &task.repos {
                 let worktree = tr.worktree_path.to_string_lossy().to_string();
                 self.conn.execute(
@@ -436,8 +442,14 @@ impl Db {
             Ok(())
         })();
         match result {
-            Ok(()) => { self.conn.execute_batch("COMMIT")?; Ok(()) }
-            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
     }
 
@@ -454,7 +466,14 @@ impl Db {
             let pane_id: Option<String> = row.get(4)?;
             let created_at = str_to_dt(&created_at_str).unwrap_or_else(Utc::now);
             let repos = self.load_task_repos(&id)?;
-            Ok(Some(TaskEntry { id, path: PathBuf::from(path), created_at, tmux_window, pane_id, repos }))
+            Ok(Some(TaskEntry {
+                id,
+                path: PathBuf::from(path),
+                created_at,
+                tmux_window,
+                pane_id,
+                repos,
+            }))
         } else {
             Ok(None)
         }
@@ -480,8 +499,7 @@ impl Db {
 
         let mut tasks = Vec::with_capacity(ids.len());
         for (id, path, created_at_str, tmux_window, pane_id) in ids {
-            let created_at = str_to_dt(&created_at_str)
-                .unwrap_or_else(Utc::now);
+            let created_at = str_to_dt(&created_at_str).unwrap_or_else(Utc::now);
             let repos = self.load_task_repos(&id)?;
             tasks.push(TaskEntry {
                 id,
@@ -498,15 +516,14 @@ impl Db {
     pub fn delete_task(&self, id: &str) -> Result<(), GroveError> {
         self.conn
             .execute("DELETE FROM task_repos WHERE task_id = ?1", [id])?;
-        self.conn
-            .execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+        self.conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         Ok(())
     }
 
     fn load_task_repos(&self, task_id: &str) -> Result<Vec<TaskRepo>, GroveError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT repo_name, worktree, branch FROM task_repos WHERE task_id = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT repo_name, worktree, branch FROM task_repos WHERE task_id = ?1")?;
         let rows = stmt.query_map([task_id], |row| {
             Ok(TaskRepo {
                 repo_name: row.get(0)?,
