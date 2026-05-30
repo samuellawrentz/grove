@@ -69,7 +69,9 @@ fn register_bare_repo_and_verify_state() {
     // Verify db contains the repo
     let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
     let name: String = conn
-        .query_row("SELECT name FROM repos WHERE name = 'myrepo'", [], |r| r.get(0))
+        .query_row("SELECT name FROM repos WHERE name = 'myrepo'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(name, "myrepo");
 }
@@ -306,7 +308,9 @@ fn init_partial_failure_rollback() {
     // DB should not contain the task
     let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(count, 0, "db should not contain partially created task");
 }
@@ -340,7 +344,9 @@ fn close_existing_task() {
     // DB should not contain the task
     let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(count, 0, "task should be removed from db after close");
 }

@@ -1,8 +1,8 @@
 mod agent;
 mod cli;
-mod db;
 mod commands;
 mod config;
+mod db;
 mod error;
 mod git;
 mod output;

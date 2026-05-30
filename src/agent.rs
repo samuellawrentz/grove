@@ -7,8 +7,8 @@ use std::sync::{LazyLock, Mutex};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::error::GroveError;
 use crate::db::TaskEntry;
+use crate::error::GroveError;
 use crate::tmux::{self, PaneInfo};
 
 const STATE_FILE: &str = "/tmp/claude-panes.json";
@@ -298,7 +298,10 @@ pub fn detect_via_process_tree(pane: &PaneInfo) -> Option<AgentKind> {
                 let mut cache = TREE_CACHE.lock().unwrap();
                 cache.insert(
                     pane.pane_id.clone(),
-                    CachedKind { pane_pid: pane.pid, kind },
+                    CachedKind {
+                        pane_pid: pane.pid,
+                        kind,
+                    },
                 );
                 return Some(kind);
             }
@@ -312,7 +315,10 @@ pub fn detect_via_process_tree(pane: &PaneInfo) -> Option<AgentKind> {
 }
 
 fn child_pids(parent: u32) -> Vec<u32> {
-    let Ok(out) = Command::new("pgrep").args(["-P", &parent.to_string()]).output() else {
+    let Ok(out) = Command::new("pgrep")
+        .args(["-P", &parent.to_string()])
+        .output()
+    else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -333,7 +339,11 @@ fn process_command(pid: u32) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Detect agent + state, in priority order:

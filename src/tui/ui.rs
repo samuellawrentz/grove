@@ -22,8 +22,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(outer[0])
     } else {
-        Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
-            .split(outer[0])
+        Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)]).split(outer[0])
     };
 
     // Split sidebar into tree (top) and projects (bottom)
@@ -338,7 +337,11 @@ fn draw_notepad(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         format!(" \u{270e} Notepad: {} ", project_name)
     };
 
-    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+    let border_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))

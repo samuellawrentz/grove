@@ -296,7 +296,8 @@ fn create_tmux_window(
         let agent_name = opts.agent.unwrap_or("claude");
         let cmd = config.resolved_agent_command(agent_name);
         agent::launch_in_pane(&window_target, &cmd, verbose)?;
-        launched_kind = agent::AgentKind::parse(agent_name).or_else(|| agent::AgentKind::from_command(&cmd));
+        launched_kind =
+            agent::AgentKind::parse(agent_name).or_else(|| agent::AgentKind::from_command(&cmd));
     }
 
     Ok((window_target, pane_id, launched_kind))
