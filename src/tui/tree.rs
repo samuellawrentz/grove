@@ -726,7 +726,7 @@ mod tests {
         assert!(!tree.groups[0].expanded);
 
         // Rebuild with same data
-        tree.rebuild(&panes, &states, "");
+        tree.rebuild(&panes, &states, &HashMap::new(), None, "");
 
         // First group should still be collapsed
         assert!(!tree.groups[0].expanded);
