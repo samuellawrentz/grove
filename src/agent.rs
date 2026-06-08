@@ -13,6 +13,11 @@ use crate::tmux::{self, PaneInfo};
 
 const STATE_FILE: &str = "/tmp/claude-panes.json";
 
+/// Entries whose `updated` timestamp is older than this are treated as dead
+/// (agent crashed / exited without a cleanup). Entries with no timestamp
+/// (legacy producers) are never expired.
+const STATE_TTL_SECS: u64 = 300;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -173,23 +178,67 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
 #[derive(Deserialize)]
 struct PaneStateEntry {
     state: AgentState,
+    /// Which agent wrote this entry. Optional for legacy producers (assumed Claude).
+    #[serde(default)]
+    kind: Option<String>,
+    /// Unix seconds of the last update; used to expire dead entries.
+    #[serde(default)]
+    updated: Option<u64>,
 }
 
-/// Read the external hook's state file and return agent state per pane ID.
-/// Missing file returns an empty map (not an error).
-pub fn read_state_file() -> Result<HashMap<String, AgentState>, GroveError> {
-    read_state_file_from(Path::new(STATE_FILE))
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
-fn read_state_file_from(path: &Path) -> Result<HashMap<String, AgentState>, GroveError> {
+fn is_stale(entry: &PaneStateEntry, now: u64) -> bool {
+    matches!(entry.updated, Some(u) if now.saturating_sub(u) > STATE_TTL_SECS)
+}
+
+/// Read and parse the raw state file. Missing file returns an empty map.
+fn read_entries(path: &Path) -> Result<HashMap<String, PaneStateEntry>, GroveError> {
     match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let raw: HashMap<String, PaneStateEntry> = serde_json::from_str(&contents)?;
-            Ok(raw.into_iter().map(|(id, e)| (id, e.state)).collect())
-        }
+        Ok(contents) => Ok(serde_json::from_str(&contents)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Read the external hook's state file and return agent state per pane ID.
+/// Stale entries (see `STATE_TTL_SECS`) are dropped. Missing file returns an
+/// empty map (not an error).
+pub fn read_state_file() -> Result<HashMap<String, AgentState>, GroveError> {
+    read_state_file_from(Path::new(STATE_FILE), now_unix())
+}
+
+fn read_state_file_from(
+    path: &Path,
+    now: u64,
+) -> Result<HashMap<String, AgentState>, GroveError> {
+    let raw = read_entries(path)?;
+    Ok(raw
+        .into_iter()
+        .filter(|(_, e)| !is_stale(e, now))
+        .map(|(id, e)| (id, e.state))
+        .collect())
+}
+
+/// Read pane_id -> AgentKind for entries that declare a `kind`. Lets non-Claude
+/// agents (Codex, OpenCode, ...) report their identity via the same state file.
+pub fn read_state_kinds() -> HashMap<String, AgentKind> {
+    read_state_kinds_from(Path::new(STATE_FILE), now_unix())
+}
+
+fn read_state_kinds_from(path: &Path, now: u64) -> HashMap<String, AgentKind> {
+    let Ok(raw) = read_entries(path) else {
+        return HashMap::new();
+    };
+    raw.into_iter()
+        .filter(|(_, e)| !is_stale(e, now))
+        .filter_map(|(id, e)| e.kind.as_deref().and_then(AgentKind::parse).map(|k| (id, k)))
+        .collect()
 }
 
 /// Launch an agent in a tmux pane by sending the command as keystrokes.
@@ -346,10 +395,15 @@ pub fn detect_agent_in_pane(
     state_file_states: &HashMap<String, AgentState>,
     recorded_kinds: &HashMap<String, AgentKind>,
 ) -> Option<AgentInfo> {
-    // 1. State file (Claude hook)
+    // 1. State file (agent hook). Use the recorded/declared kind if known,
+    //    falling back to Claude for legacy entries that carry no kind.
     if let Some(state) = state_file_states.get(&pane.pane_id) {
+        let kind = recorded_kinds
+            .get(&pane.pane_id)
+            .copied()
+            .unwrap_or(AgentKind::Claude);
         return Some(AgentInfo {
-            kind: AgentKind::Claude,
+            kind,
             state: state.clone(),
         });
     }
@@ -400,7 +454,7 @@ mod tests {
     #[test]
     fn test_missing_state_file() {
         let path = Path::new("/tmp/grove-test-nonexistent-state.json");
-        let result = read_state_file_from(path).unwrap();
+        let result = read_state_file_from(path, 0).unwrap();
         assert!(result.is_empty());
     }
 
@@ -413,7 +467,7 @@ mod tests {
         )
         .unwrap();
 
-        let states = read_state_file_from(tmp.path()).unwrap();
+        let states = read_state_file_from(tmp.path(), 0).unwrap();
         assert_eq!(states.get("%42"), Some(&AgentState::Waiting));
         assert_eq!(states.get("%55"), Some(&AgentState::Active));
         assert_eq!(states.get("%99"), None);
@@ -424,8 +478,76 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), r#"{ "%10": { "state": "unknown_value" } }"#).unwrap();
 
-        let states = read_state_file_from(tmp.path()).unwrap();
+        let states = read_state_file_from(tmp.path(), 0).unwrap();
         assert_eq!(states.get("%10"), Some(&AgentState::NotRunning));
+    }
+
+    #[test]
+    fn test_stale_entries_dropped() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // fresh @1000, stale @100, legacy (no timestamp) all in one file.
+        std::fs::write(
+            tmp.path(),
+            r#"{
+                "%fresh": { "state": "waiting", "updated": 1000 },
+                "%stale": { "state": "waiting", "updated": 100 },
+                "%legacy": { "state": "active" }
+            }"#,
+        )
+        .unwrap();
+
+        // now = 1200; TTL = 300 -> %stale (age 1100) dropped, others kept.
+        let states = read_state_file_from(tmp.path(), 1200).unwrap();
+        assert_eq!(states.get("%fresh"), Some(&AgentState::Waiting));
+        assert_eq!(states.get("%legacy"), Some(&AgentState::Active));
+        assert_eq!(states.get("%stale"), None);
+    }
+
+    #[test]
+    fn test_read_state_kinds() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{
+                "%1": { "state": "active", "kind": "codex" },
+                "%2": { "state": "waiting", "kind": "opencode" },
+                "%3": { "state": "active" },
+                "%4": { "state": "active", "kind": "bogus" }
+            }"#,
+        )
+        .unwrap();
+
+        let kinds = read_state_kinds_from(tmp.path(), 0);
+        assert_eq!(kinds.get("%1"), Some(&AgentKind::Codex));
+        assert_eq!(kinds.get("%2"), Some(&AgentKind::OpenCode));
+        assert_eq!(kinds.get("%3"), None); // no kind declared
+        assert_eq!(kinds.get("%4"), None); // unparseable kind
+    }
+
+    #[test]
+    fn test_detect_uses_state_file_kind() {
+        // A pane grove launched as Codex, reporting via the shared state file,
+        // must NOT be mislabelled as Claude.
+        let pane = make_pane("%7", "zsh");
+        let mut states = HashMap::new();
+        states.insert("%7".to_string(), AgentState::Waiting);
+        let mut recorded = HashMap::new();
+        recorded.insert("%7".to_string(), AgentKind::Codex);
+
+        let info = detect_agent_in_pane(&pane, &states, &recorded).unwrap();
+        assert_eq!(info.kind, AgentKind::Codex);
+        assert_eq!(info.state, AgentState::Waiting);
+    }
+
+    #[test]
+    fn test_detect_state_file_defaults_to_claude() {
+        let pane = make_pane("%8", "zsh");
+        let mut states = HashMap::new();
+        states.insert("%8".to_string(), AgentState::Active);
+        let recorded = HashMap::new();
+
+        let info = detect_agent_in_pane(&pane, &states, &recorded).unwrap();
+        assert_eq!(info.kind, AgentKind::Claude);
     }
 
     #[test]

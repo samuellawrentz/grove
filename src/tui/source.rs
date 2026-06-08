@@ -21,6 +21,11 @@ pub(crate) fn fetch_agent_states() -> Result<HashMap<String, AgentState>, GroveE
     agent::read_state_file()
 }
 
+/// Fetch pane_id -> AgentKind declared by hooks in the state file.
+pub(crate) fn fetch_state_kinds() -> HashMap<String, AgentKind> {
+    agent::read_state_kinds()
+}
+
 /// Load pane_id → AgentKind for panes grove launched (authoritative).
 pub(crate) fn fetch_recorded_agents(db: &Db) -> HashMap<String, AgentKind> {
     let Ok(raw) = db.list_pane_agents() else {

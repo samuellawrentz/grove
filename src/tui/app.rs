@@ -131,7 +131,12 @@ impl App {
             source::fetch_agent_states(),
         ) {
             (Ok(panes), Ok(states)) => {
-                let recorded = source::fetch_recorded_agents(&self.db);
+                // DB-recorded kinds are authoritative (set at launch); fall back
+                // to kinds the agents declared in the shared state file.
+                let mut recorded = source::fetch_recorded_agents(&self.db);
+                for (id, kind) in source::fetch_state_kinds() {
+                    recorded.entry(id).or_insert(kind);
+                }
                 let current_session = crate::tmux::current_session(self.verbose).ok();
                 let old_group_count = self.tree.groups.len();
                 self.tree
