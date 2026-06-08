@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -72,6 +72,8 @@ pub(crate) struct TreeGroup {
 pub(crate) struct TreePane {
     pub pane_info: PaneInfo,
     pub agent: Option<AgentInfo>,
+    /// User-asserted mark forcing this pane into the "others" tab.
+    pub forced_other: bool,
 }
 
 /// State for the tree view: groups, cursor, and scroll.
@@ -93,7 +95,9 @@ impl TreeState {
         exclude_pane_id: &str,
     ) -> Self {
         let recorded = HashMap::new();
-        let groups = build_groups(panes, agent_states, &recorded, None, exclude_pane_id, &[]);
+        let marked = HashSet::new();
+        let groups =
+            build_groups(panes, agent_states, &recorded, &marked, None, exclude_pane_id, &[]);
         TreeState {
             groups,
             cursor: 0,
@@ -109,6 +113,7 @@ impl TreeState {
         panes: &[PaneInfo],
         agent_states: &HashMap<String, AgentState>,
         recorded_kinds: &HashMap<String, AgentKind>,
+        marked_other: &HashSet<String>,
         current_session: Option<&str>,
         exclude_pane_id: &str,
     ) {
@@ -121,6 +126,7 @@ impl TreeState {
             panes,
             agent_states,
             recorded_kinds,
+            marked_other,
             current_session,
             exclude_pane_id,
             &old_expanded,
@@ -435,6 +441,7 @@ fn build_groups(
     panes: &[PaneInfo],
     agent_states: &HashMap<String, AgentState>,
     recorded_kinds: &HashMap<String, AgentKind>,
+    marked_other: &HashSet<String>,
     current_session: Option<&str>,
     exclude_pane_id: &str,
     old_expanded: &[(String, bool)],
@@ -453,11 +460,19 @@ fn build_groups(
             continue;
         }
 
-        let agent = detect_agent_in_pane(pane, agent_states, recorded_kinds);
+        let forced_other = marked_other.contains(&pane.pane_id);
+        // A user-marked pane is forced into the "others" tab by dropping its
+        // detected agent.
+        let agent = if forced_other {
+            None
+        } else {
+            detect_agent_in_pane(pane, agent_states, recorded_kinds)
+        };
 
         let tree_pane = TreePane {
             pane_info: pane.clone(),
             agent,
+            forced_other,
         };
 
         let project_root = resolve_project_root(&pane.current_path);
@@ -729,7 +744,7 @@ mod tests {
 
         // Rebuild with same data
         let recorded = HashMap::new();
-        tree.rebuild(&panes, &states, &recorded, None, "");
+        tree.rebuild(&panes, &states, &recorded, &HashSet::new(), None, "");
 
         // First group should still be collapsed
         assert!(!tree.groups[0].expanded);
@@ -791,7 +806,7 @@ mod tests {
         states.insert("%2".to_string(), AgentState::Waiting);
 
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, None, "", &[]);
+        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), None, "", &[]);
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
         assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1");
@@ -807,7 +822,7 @@ mod tests {
         ];
         let states = HashMap::new();
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
         assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1");
@@ -824,7 +839,7 @@ mod tests {
         states.insert("%2".to_string(), AgentState::Waiting);
 
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2"); // waiting
         assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1"); // current session
@@ -843,7 +858,7 @@ mod tests {
         states.insert("%2".to_string(), AgentState::Waiting);
 
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
 
         assert_eq!(groups.len(), 1);
         let g = &groups[0];
@@ -862,7 +877,7 @@ mod tests {
         ];
         let states = HashMap::new();
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, Some("main"), "", &[]);
+        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
         assert_eq!(groups[0].panes[1].pane_info.pane_id, "%1");

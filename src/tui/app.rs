@@ -137,10 +137,17 @@ impl App {
                 for (id, kind) in source::fetch_state_kinds() {
                     recorded.entry(id).or_insert(kind);
                 }
+                let marked = self.db.list_pane_overrides();
                 let current_session = crate::tmux::current_session(self.verbose).ok();
                 let old_group_count = self.tree.groups.len();
-                self.tree
-                    .rebuild(&panes, &states, &recorded, current_session.as_deref(), "");
+                self.tree.rebuild(
+                    &panes,
+                    &states,
+                    &recorded,
+                    &marked,
+                    current_session.as_deref(),
+                    "",
+                );
                 self.status_message = None;
                 // Only upsert projects when groups change (avoids writes every 5s tick)
                 if self.tree.groups.len() != old_group_count {
