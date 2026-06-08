@@ -380,6 +380,115 @@ fn close_existing_task() {
     assert_eq!(count, 0, "task should be removed from db after close");
 }
 
+/// Returns true if `branch` exists in the bare repo at `bare`.
+fn branch_exists(bare: &std::path::Path, branch: &str) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["-C", bare.to_str().unwrap(), "branch", "--list", branch])
+        .output()
+        .expect("git branch --list failed");
+    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+}
+
+#[test]
+fn close_deletes_merged_branch_by_default() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    let grove_bare = fix.repos_dir.join("myrepo.git");
+    assert!(branch_exists(&grove_bare, "TASK-1"), "branch should exist after init");
+
+    // A fresh task branch points at main's commit => merged => safe-deleted by default.
+    fix.grove_cmd().args(["close", "TASK-1"]).assert().success();
+
+    assert!(
+        !branch_exists(&grove_bare, "TASK-1"),
+        "merged branch should be deleted by default close"
+    );
+}
+
+#[test]
+fn close_keeps_unmerged_branch_without_force() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    // Advance the task branch beyond main so it is unmerged.
+    let worktree = fix.tasks_dir.join("TASK-1").join("myrepo");
+    std::fs::write(worktree.join("new.txt"), "work").unwrap();
+    let commit = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(args)
+            .output()
+            .expect("git failed");
+    };
+    commit(&["add", "."]);
+    commit(&["commit", "-m", "unmerged work"]);
+
+    // Default close keeps the unmerged branch (warns) but still succeeds.
+    fix.grove_cmd().args(["close", "TASK-1"]).assert().success();
+    assert!(
+        branch_exists(&fix.repos_dir.join("myrepo.git"), "TASK-1"),
+        "unmerged branch should be preserved by default close"
+    );
+}
+
+#[test]
+fn close_force_deletes_unmerged_branch() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    let worktree = fix.tasks_dir.join("TASK-1").join("myrepo");
+    std::fs::write(worktree.join("new.txt"), "work").unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(args)
+            .output()
+            .expect("git failed");
+    };
+    git(&["add", "."]);
+    git(&["commit", "-m", "unmerged work"]);
+
+    // -D force-deletes the unmerged branch.
+    fix.grove_cmd()
+        .args(["close", "-D", "TASK-1"])
+        .assert()
+        .success();
+    assert!(
+        !branch_exists(&fix.repos_dir.join("myrepo.git"), "TASK-1"),
+        "unmerged branch should be force-deleted with -D"
+    );
+}
+
 #[test]
 fn close_nonexistent_task_exit_2() {
     let fix = TestFixture::new();

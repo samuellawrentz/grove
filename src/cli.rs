@@ -85,7 +85,7 @@ pub enum Commands {
         /// Force close even with uncommitted changes
         #[arg(long)]
         force: bool,
-        /// Also delete task branches from bare repos
+        /// Force-delete task branches even if unmerged (close deletes merged branches by default)
         #[arg(long, short = 'D')]
         delete_branches: bool,
         /// Interactive mode: select task from list

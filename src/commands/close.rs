@@ -117,27 +117,35 @@ pub fn run(
         }
     }
 
-    if delete_branches {
-        for task_repo in &task.repos {
-            let bare_path = all_repos
-                .iter()
-                .find(|r| r.name == task_repo.repo_name)
-                .map(|r| r.path.clone());
+    // Always clean up the task branch. By default use a safe delete (merged-only)
+    // so unmerged work is preserved; `--delete-branches/-D` force-deletes regardless.
+    for task_repo in &task.repos {
+        let bare_path = all_repos
+            .iter()
+            .find(|r| r.name == task_repo.repo_name)
+            .map(|r| r.path.clone());
 
-            if let Some(bp) = bare_path {
-                if bp.exists() {
-                    if let Err(e) = git::delete_branch(&bp, &task_repo.branch, verbose) {
+        if let Some(bp) = bare_path {
+            if bp.exists() {
+                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose) {
+                    if delete_branches {
                         warnings.push(format!(
                             "failed to delete branch '{}' from '{}': {e}",
                             task_repo.branch, task_repo.repo_name
                         ));
-                    }
-                    if let Err(e) = git::prune_worktrees(&bp, verbose) {
+                    } else {
                         warnings.push(format!(
-                            "failed to prune worktrees for '{}': {e}",
-                            task_repo.repo_name
+                            "branch '{}' in '{}' is not merged; kept it. \
+                             Re-run with --delete-branches/-D to force-delete.",
+                            task_repo.branch, task_repo.repo_name
                         ));
                     }
+                }
+                if let Err(e) = git::prune_worktrees(&bp, verbose) {
+                    warnings.push(format!(
+                        "failed to prune worktrees for '{}': {e}",
+                        task_repo.repo_name
+                    ));
                 }
             }
         }

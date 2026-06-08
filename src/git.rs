@@ -222,9 +222,17 @@ pub fn remove_worktree(
 }
 
 /// Delete a branch from a bare repo.
-/// Runs `git branch -D <branch>`.
-pub fn delete_branch(bare_path: &Path, branch: &str, verbose: bool) -> Result<(), GroveError> {
-    run_git(&["branch", "-D", branch], Some(bare_path), verbose)?;
+/// Runs `git branch -d <branch>` (safe: merged-only) or `-D` when `force` is set.
+/// The safe variant deletes branches merged into their upstream or HEAD and
+/// fails on unmerged branches, preserving unmerged work.
+pub fn delete_branch(
+    bare_path: &Path,
+    branch: &str,
+    force: bool,
+    verbose: bool,
+) -> Result<(), GroveError> {
+    let flag = if force { "-D" } else { "-d" };
+    run_git(&["branch", flag, branch], Some(bare_path), verbose)?;
     Ok(())
 }
 
