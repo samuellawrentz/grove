@@ -520,12 +520,22 @@ fn build_groups(
     groups.sort_by(|a, b| {
         let a_wait = a.panes.iter().any(is_waiting);
         let b_wait = b.panes.iter().any(is_waiting);
-        let a_cur = current_session
-            .is_some_and(|s| a.panes.iter().any(|p| p.pane_info.session_name == s));
-        let b_cur = current_session
-            .is_some_and(|s| b.panes.iter().any(|p| p.pane_info.session_name == s));
-        let a_max = a.panes.iter().map(|p| p.pane_info.activity).max().unwrap_or(0);
-        let b_max = b.panes.iter().map(|p| p.pane_info.activity).max().unwrap_or(0);
+        let a_cur =
+            current_session.is_some_and(|s| a.panes.iter().any(|p| p.pane_info.session_name == s));
+        let b_cur =
+            current_session.is_some_and(|s| b.panes.iter().any(|p| p.pane_info.session_name == s));
+        let a_max = a
+            .panes
+            .iter()
+            .map(|p| p.pane_info.activity)
+            .max()
+            .unwrap_or(0);
+        let b_max = b
+            .panes
+            .iter()
+            .map(|p| p.pane_info.activity)
+            .max()
+            .unwrap_or(0);
         b_wait
             .cmp(&a_wait)
             .then(b_cur.cmp(&a_cur))
@@ -743,8 +753,7 @@ mod tests {
         assert!(!tree.groups[0].expanded);
 
         // Rebuild with same data
-        let recorded = HashMap::new();
-        tree.rebuild(&panes, &states, &recorded, &HashSet::new(), None, "");
+        tree.rebuild(&panes, &states, &HashMap::new(), &HashSet::new(), None, "");
 
         // First group should still be collapsed
         assert!(!tree.groups[0].expanded);

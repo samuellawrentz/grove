@@ -1,7 +1,7 @@
 pub mod add;
-pub mod compose;
 pub mod attach;
 pub mod close;
+pub mod compose;
 pub mod init;
 pub mod list;
 pub mod register;
