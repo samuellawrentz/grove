@@ -78,11 +78,17 @@ pub fn new_named_window(
         .to_str()
         .ok_or_else(|| GroveError::General("invalid path for tmux window".to_string()))?;
 
+    // Colon-qualify the session target. A bare `-t <session>` is ambiguous when the
+    // session is named numerically (e.g. "0"): tmux parses it as a window-index target,
+    // collides with an occupied index, and the window is never created. The trailing
+    // colon forces a session target so tmux picks the next free, base-index-aware index.
+    let target = format!("{session}:");
+
     run_tmux(
         &[
             "new-window",
             "-t",
-            session,
+            &target,
             "-n",
             window_name,
             "-c",
@@ -133,7 +139,11 @@ pub fn get_pane_id(target: &str, verbose: bool) -> Result<String, GroveError> {
 
 /// List all panes across all tmux sessions.
 pub fn list_all_panes(verbose: bool) -> Result<Vec<PaneInfo>, GroveError> {
-    let format_str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_pid}\t#{pane_activity}";
+    // NOTE: use #{window_activity}, not #{pane_activity}. tmux does not expose a
+    // per-pane activity timestamp (empty as of tmux 3.6) — activity is tracked at
+    // the window level. An empty value would parse to 0 and silently kill the
+    // activity-based tree sort.
+    let format_str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_pid}\t#{window_activity}";
     let output = run_tmux(&["list-panes", "-a", "-F", format_str], verbose)?;
 
     let mut panes = Vec::new();

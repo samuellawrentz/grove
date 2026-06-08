@@ -119,6 +119,10 @@ impl Db {
             self.conn.execute_batch(SCHEMA_V3)?;
             self.conn.pragma_update(None, "user_version", 3)?;
         }
+        if version < 4 {
+            self.conn.execute_batch(SCHEMA_V4)?;
+            self.conn.pragma_update(None, "user_version", 4)?;
+        }
         Ok(())
     }
 
@@ -156,6 +160,34 @@ impl Db {
         self.conn
             .execute("DELETE FROM pane_agents WHERE pane_id = ?1", [pane_id])?;
         Ok(())
+    }
+
+    // ── Pane overrides ─────────────────────────────────────────────────────────
+    // User-asserted marks that force a pane into the "others" tab regardless of
+    // any detected agent.
+
+    pub fn mark_pane_other(&self, pane_id: &str) -> Result<(), GroveError> {
+        self.conn.execute(
+            "INSERT INTO pane_overrides (pane_id) VALUES (?1) ON CONFLICT(pane_id) DO NOTHING",
+            [pane_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn unmark_pane_other(&self, pane_id: &str) -> Result<(), GroveError> {
+        self.conn
+            .execute("DELETE FROM pane_overrides WHERE pane_id = ?1", [pane_id])?;
+        Ok(())
+    }
+
+    pub fn list_pane_overrides(&self) -> std::collections::HashSet<String> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT pane_id FROM pane_overrides") else {
+            return std::collections::HashSet::new();
+        };
+        let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+            return std::collections::HashSet::new();
+        };
+        rows.filter_map(Result::ok).collect()
     }
 
     // ── Projects ─────────────────────────────────────────────────────────────
@@ -587,6 +619,13 @@ CREATE TABLE IF NOT EXISTS pane_agents (
 );
 ";
 
+const SCHEMA_V4: &str = "
+CREATE TABLE IF NOT EXISTS pane_overrides (
+    pane_id   TEXT PRIMARY KEY,
+    marked_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,7 +646,26 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    #[test]
+    fn test_pane_overrides_roundtrip() {
+        let db = open_temp();
+        assert!(db.list_pane_overrides().is_empty());
+
+        db.mark_pane_other("%5").unwrap();
+        db.mark_pane_other("%5").unwrap(); // idempotent
+        db.mark_pane_other("%9").unwrap();
+        let marks = db.list_pane_overrides();
+        assert!(marks.contains("%5"));
+        assert!(marks.contains("%9"));
+        assert_eq!(marks.len(), 2);
+
+        db.unmark_pane_other("%5").unwrap();
+        let marks = db.list_pane_overrides();
+        assert!(!marks.contains("%5"));
+        assert!(marks.contains("%9"));
     }
 
     #[test]

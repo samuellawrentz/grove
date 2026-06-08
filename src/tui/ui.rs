@@ -112,18 +112,23 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     continue;
                 }
 
-                let (icon, icon_color) = match &pane.agent {
-                    Some(info) => {
-                        let def = AGENT_REGISTRY.iter().find(|d| d.kind == info.kind);
-                        let icon = def.map(|d| d.icon).unwrap_or(TERMINAL_ICON);
-                        let color = match info.state {
-                            AgentState::Active => Color::Green,
-                            AgentState::Waiting => Color::Yellow,
-                            AgentState::NotRunning => Color::DarkGray,
-                        };
-                        (icon, color)
+                let (icon, icon_color) = if pane.forced_other {
+                    // User-marked as "other" (automation/script): pin icon.
+                    ("󰐃", Color::Magenta)
+                } else {
+                    match &pane.agent {
+                        Some(info) => {
+                            let def = AGENT_REGISTRY.iter().find(|d| d.kind == info.kind);
+                            let icon = def.map(|d| d.icon).unwrap_or(TERMINAL_ICON);
+                            let color = match info.state {
+                                AgentState::Active => Color::Green,
+                                AgentState::Waiting => Color::Yellow,
+                                AgentState::NotRunning => Color::DarkGray,
+                            };
+                            (icon, color)
+                        }
+                        None => (TERMINAL_ICON, Color::DarkGray),
                     }
-                    None => (TERMINAL_ICON, Color::DarkGray),
                 };
 
                 let basename = pane
@@ -432,7 +437,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         } else {
             match app.sidebar_focus {
                 SidebarFocus::Tree => {
-                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C-r:notepad m:focus  C:claude O:opencode X:codex U:cursor  T:term  a/r:accept/reject  s:send  o:open  q:quit"
+                    "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C-r:notepad m:focus  C:claude O:opencode X:codex U:cursor  T:term  M:mark-other  a/r:accept/reject  s:send  o:open  q:quit"
                 }
                 SidebarFocus::Projects => {
                     "j/k:nav  C-h/C-l:pane  c/Enter:continue  n:new  t:terminal  m:notepad  x:remove  q:quit"

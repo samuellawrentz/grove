@@ -450,6 +450,21 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
                 launch_split(app, &target, &cwd, None);
             }
         }
+        KeyCode::Char('M') => {
+            if let Some(pane) = app.tree.selected_pane() {
+                let pane_id = pane.pane_info.pane_id.clone();
+                let result = if pane.forced_other {
+                    app.db.unmark_pane_other(&pane_id)
+                } else {
+                    app.db.mark_pane_other(&pane_id)
+                };
+                if let Err(e) = result {
+                    app.status_message = Some(format!("Mark error: {e}"));
+                }
+                app.refresh_tree();
+                app.refresh_preview();
+            }
+        }
         KeyCode::Char('g') => {
             app.tree.jump_first_pane();
             update_scroll(app);
