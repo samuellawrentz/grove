@@ -127,7 +127,8 @@ pub fn run(
 
         if let Some(bp) = bare_path {
             if bp.exists() {
-                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose) {
+                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose)
+                {
                     if delete_branches {
                         warnings.push(format!(
                             "failed to delete branch '{}' from '{}': {e}",

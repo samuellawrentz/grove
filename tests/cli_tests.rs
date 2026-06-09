@@ -410,7 +410,10 @@ fn close_deletes_merged_branch_by_default() {
         .success();
 
     let grove_bare = fix.repos_dir.join("myrepo.git");
-    assert!(branch_exists(&grove_bare, "TASK-1"), "branch should exist after init");
+    assert!(
+        branch_exists(&grove_bare, "TASK-1"),
+        "branch should exist after init"
+    );
 
     // A fresh task branch points at main's commit => merged => safe-deleted by default.
     fix.grove_cmd().args(["close", "TASK-1"]).assert().success();

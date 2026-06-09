@@ -213,10 +213,7 @@ pub fn read_state_file() -> Result<HashMap<String, AgentState>, GroveError> {
     read_state_file_from(Path::new(STATE_FILE), now_unix())
 }
 
-fn read_state_file_from(
-    path: &Path,
-    now: u64,
-) -> Result<HashMap<String, AgentState>, GroveError> {
+fn read_state_file_from(path: &Path, now: u64) -> Result<HashMap<String, AgentState>, GroveError> {
     let raw = read_entries(path)?;
     Ok(raw
         .into_iter()
@@ -237,7 +234,12 @@ fn read_state_kinds_from(path: &Path, now: u64) -> HashMap<String, AgentKind> {
     };
     raw.into_iter()
         .filter(|(_, e)| !is_stale(e, now))
-        .filter_map(|(id, e)| e.kind.as_deref().and_then(AgentKind::parse).map(|k| (id, k)))
+        .filter_map(|(id, e)| {
+            e.kind
+                .as_deref()
+                .and_then(AgentKind::parse)
+                .map(|k| (id, k))
+        })
         .collect()
 }
 

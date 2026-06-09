@@ -96,8 +96,15 @@ impl TreeState {
     ) -> Self {
         let recorded = HashMap::new();
         let marked = HashSet::new();
-        let groups =
-            build_groups(panes, agent_states, &recorded, &marked, None, exclude_pane_id, &[]);
+        let groups = build_groups(
+            panes,
+            agent_states,
+            &recorded,
+            &marked,
+            None,
+            exclude_pane_id,
+            &[],
+        );
         TreeState {
             groups,
             cursor: 0,
@@ -831,7 +838,15 @@ mod tests {
         ];
         let states = HashMap::new();
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
+        let groups = build_groups(
+            &panes,
+            &states,
+            &recorded,
+            &HashSet::new(),
+            Some("main"),
+            "",
+            &[],
+        );
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
         assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1");
@@ -848,7 +863,15 @@ mod tests {
         states.insert("%2".to_string(), AgentState::Waiting);
 
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
+        let groups = build_groups(
+            &panes,
+            &states,
+            &recorded,
+            &HashSet::new(),
+            Some("main"),
+            "",
+            &[],
+        );
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2"); // waiting
         assert_eq!(groups[1].panes[0].pane_info.pane_id, "%1"); // current session
@@ -867,7 +890,15 @@ mod tests {
         states.insert("%2".to_string(), AgentState::Waiting);
 
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
+        let groups = build_groups(
+            &panes,
+            &states,
+            &recorded,
+            &HashSet::new(),
+            Some("main"),
+            "",
+            &[],
+        );
 
         assert_eq!(groups.len(), 1);
         let g = &groups[0];
@@ -886,7 +917,15 @@ mod tests {
         ];
         let states = HashMap::new();
         let recorded = HashMap::new();
-        let groups = build_groups(&panes, &states, &recorded, &HashSet::new(), Some("main"), "", &[]);
+        let groups = build_groups(
+            &panes,
+            &states,
+            &recorded,
+            &HashSet::new(),
+            Some("main"),
+            "",
+            &[],
+        );
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
         assert_eq!(groups[0].panes[1].pane_info.pane_id, "%1");
