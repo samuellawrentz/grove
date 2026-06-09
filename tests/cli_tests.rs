@@ -447,7 +447,15 @@ fn close_keeps_unmerged_branch_without_force() {
             .expect("git failed");
     };
     commit(&["add", "."]);
-    commit(&["commit", "-m", "unmerged work"]);
+    commit(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@test.com",
+        "commit",
+        "-m",
+        "unmerged work",
+    ]);
 
     // Default close keeps the unmerged branch (warns) but still succeeds.
     fix.grove_cmd().args(["close", "TASK-1"]).assert().success();
@@ -482,7 +490,15 @@ fn close_force_deletes_unmerged_branch() {
             .expect("git failed");
     };
     git(&["add", "."]);
-    git(&["commit", "-m", "unmerged work"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@test.com",
+        "commit",
+        "-m",
+        "unmerged work",
+    ]);
 
     // -D force-deletes the unmerged branch.
     fix.grove_cmd()
