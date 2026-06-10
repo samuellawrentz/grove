@@ -28,10 +28,15 @@ pub fn run(
         .get(&live_pane_id)
         .cloned()
         .unwrap_or(agent::AgentState::NotRunning);
-    if agent_state != agent::AgentState::Waiting {
+    // Only block when the agent is mid-turn (Active) — sending keystrokes then
+    // would interleave with its work. Every other state (Waiting on a prompt,
+    // freshly launched / idle at the prompt with no state-file entry yet) is a
+    // legitimate moment to send input.
+    if agent_state == agent::AgentState::Active {
         return Err(GroveError::General(format!(
-            "Agent is not waiting for input (current state: {agent_state}). \
-             Ensure claude-tmux-status.sh hook is running if state seems wrong."
+            "Agent is busy working (current state: {agent_state}); wait for it to \
+             finish its turn before sending. Ensure agent-tmux-status.sh hook is \
+             running if state seems wrong."
         )));
     }
 
