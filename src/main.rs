@@ -10,11 +10,15 @@ mod tmux;
 mod tui;
 mod validation;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands};
 use error::GroveError;
 
 fn main() {
+    // Dynamic shell completion hook. No-op unless the COMPLETE env var is set
+    // (i.e. the shell is requesting completions). Must run before Cli::parse().
+    clap_complete::env::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     let json_mode_flag = cli.json;
 

@@ -1,5 +1,33 @@
 use clap::{Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::PathBuf;
+
+/// Dynamic completion: registered repo names. Degrades to empty on any error
+/// (completion must never fail loudly).
+fn complete_repos() -> Vec<CompletionCandidate> {
+    let Ok(db) = crate::db::Db::open() else {
+        return Vec::new();
+    };
+    db.list_repos()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| CompletionCandidate::new(r.name).help(Some(r.url.into())))
+        .collect()
+}
+
+/// Dynamic completion: active task ids. Degrades to empty on any error.
+fn complete_tasks() -> Vec<CompletionCandidate> {
+    let Ok(db) = crate::db::Db::open() else {
+        return Vec::new();
+    };
+    db.list_tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| {
+            CompletionCandidate::new(t.id).help(Some(t.path.to_string_lossy().into_owned().into()))
+        })
+        .collect()
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,6 +68,7 @@ pub enum Commands {
     /// Fetch updates for registered repositories
     Sync {
         /// Repository name (omit for all)
+        #[arg(add = ArgValueCandidates::new(complete_repos))]
         repo: Option<String>,
     },
 
@@ -48,6 +77,7 @@ pub enum Commands {
         /// Task identifier (prompted in interactive mode if omitted)
         task_id: Option<String>,
         /// Repository names to include
+        #[arg(add = ArgValueCandidates::new(complete_repos))]
         repos: Vec<String>,
         /// Context text for CONTEXT.md
         #[arg(long)]
@@ -81,6 +111,7 @@ pub enum Commands {
     /// Close a task and remove its worktrees
     Close {
         /// Task identifier (prompted in interactive mode if omitted)
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
         task_id: Option<String>,
         /// Force close even with uncommitted changes
         #[arg(long)]
@@ -99,18 +130,21 @@ pub enum Commands {
     /// Attach to a task's tmux window
     Attach {
         /// Task identifier
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
         task_id: String,
     },
 
     /// Show task status with Claude state
     Status {
         /// Task identifier (omit for all tasks)
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
         task_id: Option<String>,
     },
 
     /// Send a prompt to Claude in a task
     Send {
         /// Task identifier
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
         task_id: String,
         /// Prompt text to send
         prompt: String,
@@ -140,8 +174,10 @@ pub enum Commands {
     /// Add a repo to an existing task
     Add {
         /// Task identifier
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
         task_id: String,
         /// Repository name to add
+        #[arg(add = ArgValueCandidates::new(complete_repos))]
         repo: String,
         /// Branch name (default: match existing task branch)
         #[arg(long)]
