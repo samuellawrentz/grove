@@ -122,6 +122,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                             let color = match info.state {
                                 AgentState::Active => Color::Green,
                                 AgentState::Waiting => Color::Yellow,
+                                AgentState::Idle => Color::Cyan,
                                 AgentState::NotRunning => Color::DarkGray,
                             };
                             (icon, color)

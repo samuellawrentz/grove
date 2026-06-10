@@ -437,10 +437,13 @@ pub(crate) fn shorten_path(path: &std::path::Path) -> String {
     }
 }
 
-fn is_waiting(p: &TreePane) -> bool {
+/// A pane needs the user's attention when its agent has finished a turn
+/// (`Idle`, i.e. the Stop hook fired) or is blocked on an approval prompt
+/// (`Waiting`). These float to the top, newest attention event first.
+fn needs_attention(p: &TreePane) -> bool {
     p.agent
         .as_ref()
-        .map(|a| matches!(a.state, AgentState::Waiting))
+        .map(|a| matches!(a.state, AgentState::Waiting | AgentState::Idle))
         .unwrap_or(false)
 }
 
@@ -490,15 +493,24 @@ fn build_groups(
         .into_iter()
         .map(|(path, mut panes)| {
             let name = shorten_path(&path);
-            // Tiered sort: waiting first, then panes in current tmux session,
-            // then by activity desc; session:window as final tiebreaker.
+            // Tiered sort: attention-needing panes first, ordered among
+            // themselves by most recent activity (≈ when the Stop hook fired);
+            // then panes in current tmux session, then by activity desc;
+            // session:window as final tiebreaker.
             panes.sort_by(|a, b| {
-                let a_wait = is_waiting(a);
-                let b_wait = is_waiting(b);
+                let a_att = needs_attention(a);
+                let b_att = needs_attention(b);
                 let a_cur = current_session.is_some_and(|s| a.pane_info.session_name == s);
                 let b_cur = current_session.is_some_and(|s| b.pane_info.session_name == s);
-                b_wait
-                    .cmp(&a_wait)
+                b_att
+                    .cmp(&a_att)
+                    .then_with(|| {
+                        if a_att && b_att {
+                            b.pane_info.activity.cmp(&a.pane_info.activity)
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
+                    })
                     .then(b_cur.cmp(&a_cur))
                     .then(b.pane_info.activity.cmp(&a.pane_info.activity))
                     .then(a.pane_info.session_name.cmp(&b.pane_info.session_name))
@@ -521,12 +533,12 @@ fn build_groups(
         })
         .collect();
 
-    // Tiered group sort: groups with a waiting pane first, then groups
-    // containing a pane in the current tmux session, then by most recent
+    // Tiered group sort: groups with an attention-needing pane first, then
+    // groups containing a pane in the current tmux session, then by most recent
     // pane activity, alphabetical tiebreaker.
     groups.sort_by(|a, b| {
-        let a_wait = a.panes.iter().any(is_waiting);
-        let b_wait = b.panes.iter().any(is_waiting);
+        let a_att = a.panes.iter().any(needs_attention);
+        let b_att = b.panes.iter().any(needs_attention);
         let a_cur =
             current_session.is_some_and(|s| a.panes.iter().any(|p| p.pane_info.session_name == s));
         let b_cur =
@@ -543,8 +555,8 @@ fn build_groups(
             .map(|p| p.pane_info.activity)
             .max()
             .unwrap_or(0);
-        b_wait
-            .cmp(&a_wait)
+        b_att
+            .cmp(&a_att)
             .then(b_cur.cmp(&a_cur))
             .then(b_max.cmp(&a_max))
             .then(a.name.cmp(&b.name))
@@ -807,6 +819,38 @@ mod tests {
         let mut p = make_pane(id, session, 0, path, cmd);
         p.activity = activity;
         p
+    }
+
+    #[test]
+    fn test_panes_idle_ordered_by_latest_stop() {
+        // Three claude panes in one group: two idle (Stop hook fired), one
+        // active. Idle panes float above the active one, newest stop (highest
+        // activity) first — even though the active pane has higher activity.
+        let panes = vec![
+            pane_with_activity("%active", "main", "/opt/x", "claude", 9999),
+            pane_with_activity("%old", "main", "/opt/x", "claude", 1000),
+            pane_with_activity("%new", "main", "/opt/x", "claude", 2000),
+        ];
+        let mut states = HashMap::new();
+        states.insert("%active".to_string(), AgentState::Active);
+        states.insert("%old".to_string(), AgentState::Idle);
+        states.insert("%new".to_string(), AgentState::Idle);
+
+        let recorded = HashMap::new();
+        let groups = build_groups(
+            &panes,
+            &states,
+            &recorded,
+            &HashSet::new(),
+            Some("main"),
+            "",
+            &[],
+        );
+
+        let g = &groups[0];
+        assert_eq!(g.panes[0].pane_info.pane_id, "%new"); // newest stop
+        assert_eq!(g.panes[1].pane_info.pane_id, "%old"); // older stop
+        assert_eq!(g.panes[2].pane_info.pane_id, "%active"); // still working
     }
 
     #[test]

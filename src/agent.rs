@@ -65,6 +65,9 @@ impl AgentKind {
 pub enum AgentState {
     Active,
     Waiting,
+    /// Agent finished its turn (Stop hook fired) and is awaiting the user's
+    /// next input. Distinct from `NotRunning`: the agent is alive, just idle.
+    Idle,
     #[serde(other)]
     NotRunning,
 }
@@ -74,6 +77,7 @@ impl fmt::Display for AgentState {
         match self {
             Self::Active => write!(f, "active"),
             Self::Waiting => write!(f, "waiting"),
+            Self::Idle => write!(f, "idle"),
             Self::NotRunning => write!(f, "not running"),
         }
     }
