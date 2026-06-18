@@ -265,6 +265,305 @@ fn init_conflict_different_repos() {
         .code(6);
 }
 
+/// Install a write-only fault: a BEFORE INSERT trigger that aborts. Reads still
+/// pass, so the command reaches its terminal `Db::transaction` and fails there —
+/// a genuine deterministic DB error, no production test hook.
+fn inject_insert_fault(db_path: &std::path::Path, table: &str) {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER grove_fault BEFORE INSERT ON {table} \
+         BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+    ))
+    .unwrap();
+}
+
+fn remove_insert_fault(db_path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch("DROP TRIGGER grove_fault;").unwrap();
+}
+
+/// INIT-rollback-on-terminal-tx-failure (P0 / B1): when the terminal tx fails
+/// after the worktree + CONTEXT.md exist, the DB rolls back AND the journal
+/// unwinds task dir + worktree + branch; a clean re-init then succeeds.
+#[test]
+fn init_rollback_on_terminal_tx_failure() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("repo-a");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare.to_str().unwrap()])
+        .assert()
+        .success();
+
+    inject_insert_fault(&fix.db_path, "task_repos");
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .failure();
+
+    let task_dir = fix.tasks_dir.join("TASK-1");
+    assert!(!task_dir.exists(), "journal must remove the task dir");
+    let grove_bare = fix.repos_dir.join("repo-a.git");
+    assert!(
+        !branch_exists(&grove_bare, "TASK-1"),
+        "journal must delete the freshly-created branch"
+    );
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0, "terminal tx must roll back the tasks row");
+
+    remove_insert_fault(&fix.db_path);
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .success();
+    assert!(
+        task_dir.exists(),
+        "clean re-init succeeds after the fault clears"
+    );
+}
+
+/// ADD-rollback-worktree-on-tx-failure (P0 / B2): a failed terminal tx leaves
+/// the new repo's worktree+branch gone and task_repos reflecting only the
+/// original repo.
+#[test]
+fn add_rollback_worktree_on_tx_failure() {
+    let fix = TestFixture::new();
+    let bare_a = fix.create_bare_repo("repo-a");
+    let bare_b = fix.create_bare_repo("repo-b");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare_a.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["register", "repo-b", bare_b.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .success();
+
+    inject_insert_fault(&fix.db_path, "task_repos");
+    fix.grove_cmd()
+        .args(["add", "TASK-1", "repo-b"])
+        .assert()
+        .failure();
+
+    let wt_b = fix.tasks_dir.join("TASK-1").join("repo-b");
+    assert!(!wt_b.exists(), "journal must remove the repo-b worktree");
+    let grove_bare_b = fix.repos_dir.join("repo-b.git");
+    assert!(
+        !branch_exists(&grove_bare_b, "TASK-1"),
+        "journal must delete the repo-b branch"
+    );
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let repos: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT repo_name FROM task_repos WHERE task_id = 'TASK-1'")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(
+        repos,
+        vec!["repo-a".to_string()],
+        "tx rollback keeps repo-a only"
+    );
+}
+
+/// REGISTER-rollback-bare-clone-on-tx-failure (P0 / N3): a failed terminal tx
+/// removes the orphan bare clone so retry is not poisoned.
+#[test]
+fn register_rollback_bare_clone_on_tx_failure() {
+    let fix = TestFixture::new();
+    // Materialize the DB + schema so a trigger can be installed pre-register.
+    fix.grove_cmd().args(["repos"]).assert().success();
+    inject_insert_fault(&fix.db_path, "repos");
+
+    let src = fix.create_bare_repo("src");
+    let bare_path = fix.repos_dir.join("myrepo.git");
+    fix.grove_cmd()
+        .args(["register", "myrepo", src.to_str().unwrap()])
+        .assert()
+        .failure();
+    assert!(
+        !bare_path.exists(),
+        "journal must remove the orphan bare clone"
+    );
+
+    remove_insert_fault(&fix.db_path);
+    fix.grove_cmd()
+        .args(["register", "myrepo", src.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(bare_path.exists(), "clean re-register succeeds");
+}
+
+/// INIT-stale-recovery-preserves-unmerged (P0 / D6): stale re-init must use a
+/// safe `-d`, preserving unmerged commits (warn) instead of `-D` destroying them.
+#[test]
+fn init_stale_recovery_preserves_unmerged() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    // Make an unmerged commit on the task branch inside its worktree.
+    let wt = fix.tasks_dir.join("TASK-1").join("myrepo");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&wt)
+            .env("LC_ALL", "C")
+            .output()
+            .expect("git failed")
+    };
+    git(&["config", "user.email", "t@t.com"]);
+    git(&["config", "user.name", "T"]);
+    std::fs::write(wt.join("extra.txt"), "unmerged work").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "unmerged-commit"]);
+
+    // Make the task stale by removing its directory (branch ref survives).
+    std::fs::remove_dir_all(fix.tasks_dir.join("TASK-1")).unwrap();
+
+    let out = fix
+        .grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "re-init should still succeed");
+
+    // The unmerged commit must survive: the rebuilt worktree reuses the branch.
+    let wt2 = fix.tasks_dir.join("TASK-1").join("myrepo");
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline"])
+        .current_dir(&wt2)
+        .env("LC_ALL", "C")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("unmerged-commit"),
+        "unmerged commit must be preserved on stale re-init"
+    );
+}
+
+/// CLOSE-idempotent-on-missing-path (P0 / N4): close clears the DB row even when
+/// the task path is already gone.
+#[test]
+fn close_idempotent_on_missing_path() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    std::fs::remove_dir_all(fix.tasks_dir.join("TASK-1")).unwrap();
+
+    fix.grove_cmd().args(["close", "TASK-1"]).assert().success();
+
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'TASK-1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "close must clear the row even with a missing path"
+    );
+}
+
+// ============================================================================
+// Sync partial-failure (Step 4 / N1)
+// ============================================================================
+
+/// Register one good repo, then inject a bad repo row whose bare path does not
+/// exist so its fetch fails. Used by both partial-failure sync tests.
+fn fixture_with_one_good_one_bad(fix: &TestFixture) {
+    let bare_a = fix.create_bare_repo("repo-a");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare_a.to_str().unwrap()])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    conn.execute(
+        "INSERT INTO repos (name, url, path, default_branch) \
+         VALUES ('repo-bad', '/nonexistent/url', '/nonexistent/bare/path.git', 'main')",
+        [],
+    )
+    .unwrap();
+}
+
+/// SYNC-json-ok-false-on-partial (P0 / N1): the JSON envelope must report
+/// `ok:false` and still list both repos when one fails.
+#[test]
+fn sync_json_ok_false_on_partial() {
+    let fix = TestFixture::new();
+    fixture_with_one_good_one_bad(&fix);
+
+    let output = fix.grove_cmd().args(["--json", "sync"]).output().unwrap();
+
+    // Partial failure: nonzero exit and (because the command also returns Err)
+    // a trailing error doc, so parse only the first JSON value off the stream.
+    assert!(!output.status.success(), "partial sync must exit nonzero");
+    let json: serde_json::Value = serde_json::Deserializer::from_slice(&output.stdout)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .expect("expected a results envelope on stdout")
+        .expect("results envelope must be valid JSON");
+
+    assert_eq!(json["ok"], false, "envelope ok must be false on partial");
+    let results = json["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 2, "both repos reported");
+    let bad = results
+        .iter()
+        .find(|r| r["repo"] == "repo-bad")
+        .expect("repo-bad present");
+    assert_eq!(bad["ok"], false);
+    assert!(bad["error"].is_string(), "failed repo carries an error");
+    let good = results
+        .iter()
+        .find(|r| r["repo"] == "repo-a")
+        .expect("repo-a present");
+    assert_eq!(good["ok"], true);
+    assert!(good.get("error").is_none(), "ok repo omits error field");
+}
+
+/// SYNC-partial-failure-exit-nonzero (P0 / N1): human-mode sync over a failing
+/// repo must exit nonzero while still reporting the good repo.
+#[test]
+fn sync_partial_failure_exit_nonzero() {
+    let fix = TestFixture::new();
+    fixture_with_one_good_one_bad(&fix);
+
+    fix.grove_cmd()
+        .args(["sync"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("repo-a ok"))
+        .stdout(predicate::str::contains("repo-bad FAILED"));
+}
+
 #[test]
 fn init_stale_state_recreates() {
     let fix = TestFixture::new();
@@ -1092,4 +1391,21 @@ fn init_with_custom_branch_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["ok"], true);
     assert_eq!(json["branch"], "my-feature");
+}
+
+/// CLI-init-no-id-no-interactive-errors (P2 / A4): `grove init` with no task id
+/// and no -i must error cleanly (not hang on a stdin prompt).
+#[test]
+fn init_no_id_no_interactive_errors() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init"]) // no task id, no -i, no repos
+        .assert()
+        .failure()
+        .stderr(predicates::prelude::predicate::str::contains("required"));
 }

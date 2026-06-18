@@ -1,9 +1,13 @@
-use crate::db::Db;
+use crate::commands::Ctx;
 use crate::error::GroveError;
 use crate::output;
 use crate::tmux;
 
-pub fn run(task_id: &str, db: &Db, json_mode: bool, verbose: bool) -> Result<(), GroveError> {
+pub fn run(task_id: &str, ctx: &Ctx) -> Result<(), GroveError> {
+    let db = ctx.db;
+    let json_mode = ctx.json_mode;
+    let verbose = ctx.verbose;
+
     let task = db
         .get_task(task_id)?
         .ok_or_else(|| GroveError::TaskNotFound(task_id.to_string()))?;

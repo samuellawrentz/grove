@@ -6,6 +6,7 @@ use std::str::FromStr;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::flat_rows::FlatRows;
 use crate::agent::{self, AgentKind, AgentState};
 use crate::db::Db;
 use crate::error::GroveError;
@@ -28,12 +29,7 @@ pub(crate) fn fetch_state_kinds() -> HashMap<String, AgentKind> {
 
 /// Load pane_id → AgentKind for panes grove launched (authoritative).
 pub(crate) fn fetch_recorded_agents(db: &Db) -> HashMap<String, AgentKind> {
-    let Ok(raw) = db.list_pane_agents() else {
-        return HashMap::new();
-    };
-    raw.into_iter()
-        .filter_map(|(pane_id, kind)| AgentKind::parse(&kind).map(|k| (pane_id, k)))
-        .collect()
+    agent::PaneAgentStore::new(db).kinds()
 }
 
 /// Capture the visible content of a tmux pane.
@@ -108,6 +104,8 @@ pub(crate) struct DiffFile {
     pub removed: usize,
     pub kind: char, // '+' new, '-' deleted, '~' modified
     pub lines: Vec<DiffLine>,
+    /// Whether this file's diff lines are currently shown.
+    pub expanded: bool,
 }
 
 /// A repo's diff data.
@@ -117,47 +115,59 @@ pub(crate) struct RepoDiff {
     pub files: Vec<DiffFile>,
 }
 
+/// Number of visible rows a single file occupies: its header, plus — when
+/// expanded — the rendered diff lines (`MAX_LINES_PER_FILE` cap) and the
+/// `... truncated` marker counted exactly when render emits it. This is the
+/// single source of truth `total_rows`/`cursor_file`/`row_for_file`/`render`
+/// all share, so counts and render can never disagree (truncation desync fix).
+fn file_row_count(file: &DiffFile) -> usize {
+    if !file.expanded {
+        return 1; // header only
+    }
+    let n = file.lines.len();
+    let shown = n.min(MAX_LINES_PER_FILE);
+    let truncated = (n > MAX_LINES_PER_FILE) as usize;
+    1 + shown + truncated
+}
+
 /// Interactive diff state with per-file expand/collapse and cursor.
 pub(crate) struct DiffState {
     pub repos: Vec<RepoDiff>,
-    pub expanded: Vec<Vec<bool>>, // [repo_idx][file_idx]
-    pub cursor: usize,            // flat row index
+    pub cursor: usize, // flat row index
 }
 
 impl DiffState {
-    pub fn new(repos: Vec<RepoDiff>) -> Self {
-        let mut expanded: Vec<Vec<bool>> =
-            repos.iter().map(|r| vec![false; r.files.len()]).collect();
-        // Auto-expand first file
-        for repo_expanded in &mut expanded {
-            if !repo_expanded.is_empty() {
-                repo_expanded[0] = true;
+    pub fn new(mut repos: Vec<RepoDiff>) -> Self {
+        // Auto-expand the first file (in the first repo that has any).
+        for repo in &mut repos {
+            if let Some(first) = repo.files.first_mut() {
+                first.expanded = true;
                 break;
             }
         }
-        DiffState {
-            repos,
-            expanded,
-            cursor: 0,
-        }
+        DiffState { repos, cursor: 0 }
     }
 
     /// Update repo data while preserving cursor and expanded state.
-    pub fn update(&mut self, repos: Vec<RepoDiff>) {
-        // Rebuild expanded, preserving old state where file counts match
-        let expanded: Vec<Vec<bool>> = repos
-            .iter()
-            .enumerate()
-            .map(|(ri, r)| {
-                if ri < self.expanded.len() && self.expanded[ri].len() == r.files.len() {
-                    self.expanded[ri].clone()
-                } else {
-                    vec![false; r.files.len()]
+    /// Expansion is preserved per file by `(repo path, file name)`, so adding or
+    /// removing files no longer collapses everything the user has open.
+    pub fn update(&mut self, mut repos: Vec<RepoDiff>) {
+        // Index prior expansion by (repo path, file name).
+        let mut prior: std::collections::HashMap<(&str, &str), bool> =
+            std::collections::HashMap::new();
+        for repo in &self.repos {
+            for file in &repo.files {
+                prior.insert((repo.path.as_str(), file.name.as_str()), file.expanded);
+            }
+        }
+        for repo in &mut repos {
+            for file in &mut repo.files {
+                if let Some(&was) = prior.get(&(repo.path.as_str(), file.name.as_str())) {
+                    file.expanded = was;
                 }
-            })
-            .collect();
+            }
+        }
         self.repos = repos;
-        self.expanded = expanded;
         // Clamp cursor
         let total = self.total_rows();
         if total > 0 && self.cursor >= total {
@@ -168,16 +178,13 @@ impl DiffState {
     /// Total visible rows.
     pub fn total_rows(&self) -> usize {
         let mut count = 0;
-        for (ri, repo) in self.repos.iter().enumerate() {
+        for repo in &self.repos {
             count += 1; // repo header
             if repo.files.is_empty() {
                 count += 1; // "No changes"
             }
-            for (fi, file) in repo.files.iter().enumerate() {
-                count += 1; // file header
-                if self.expanded[ri][fi] {
-                    count += file.lines.len();
-                }
+            for file in &repo.files {
+                count += file_row_count(file);
             }
         }
         count
@@ -199,10 +206,7 @@ impl DiffState {
                 if row == self.cursor {
                     return Some((ri, fi));
                 }
-                row += 1;
-                if self.expanded[ri][fi] {
-                    row += file.lines.len();
-                }
+                row += file_row_count(file);
             }
         }
         None
@@ -211,59 +215,35 @@ impl DiffState {
     /// Toggle expand/collapse on the file under cursor.
     pub fn toggle_expand(&mut self) {
         if let Some((ri, fi)) = self.cursor_file() {
-            self.expanded[ri][fi] = !self.expanded[ri][fi];
+            self.repos[ri].files[fi].expanded = !self.repos[ri].files[fi].expanded;
         }
     }
 
-    /// Move cursor down by n rows, auto-expanding files when landing on them.
-    pub fn move_down_by(&mut self, n: usize) {
-        let total = self.total_rows();
-        for _ in 0..n {
-            if self.cursor + 1 >= total {
-                break;
-            }
-            self.cursor += 1;
-            // Recalculate total since expanding changes row count
-            self.auto_expand_at_cursor();
-        }
-    }
-
-    /// Move cursor down.
+    /// Move cursor down. Cursor/overrun math is the shared `FlatRows` trait.
     pub fn move_down(&mut self) {
-        self.move_down_by(1);
-    }
-
-    /// Move cursor up by n rows.
-    pub fn move_up_by(&mut self, n: usize) {
-        for _ in 0..n {
-            if self.cursor == 0 {
-                break;
-            }
-            self.cursor -= 1;
-            self.auto_expand_at_cursor();
-        }
+        FlatRows::move_down_by(self, 1);
     }
 
     /// Move cursor up.
     pub fn move_up(&mut self) {
-        self.move_up_by(1);
+        FlatRows::move_up_by(self, 1);
     }
 
     /// If cursor is on a file header, expand it (and collapse the previous one).
     fn auto_expand_at_cursor(&mut self) {
         if let Some((ri, fi)) = self.cursor_file() {
-            if !self.expanded[ri][fi] {
+            if !self.repos[ri].files[fi].expanded {
                 // Collapse all other files
-                for (r, repo_exp) in self.expanded.iter_mut().enumerate() {
-                    for (f, exp) in repo_exp.iter_mut().enumerate() {
+                for (r, repo) in self.repos.iter_mut().enumerate() {
+                    for (f, file) in repo.files.iter_mut().enumerate() {
                         if r != ri || f != fi {
-                            *exp = false;
+                            file.expanded = false;
                         }
                     }
                 }
                 // Recalculate cursor position after collapsing
                 self.cursor = self.row_for_file(ri, fi);
-                self.expanded[ri][fi] = true;
+                self.repos[ri].files[fi].expanded = true;
             }
         }
     }
@@ -281,10 +261,7 @@ impl DiffState {
                 if ri == target_ri && fi == target_fi {
                     return row;
                 }
-                row += 1;
-                if self.expanded[ri][fi] {
-                    row += file.lines.len();
-                }
+                row += file_row_count(file);
             }
         }
         row
@@ -312,7 +289,7 @@ impl DiffState {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.total_rows());
         let mut row = 0;
 
-        for (ri, repo) in self.repos.iter().enumerate() {
+        for repo in &self.repos {
             let repo_style = if row == self.cursor {
                 style_repo.bg(Color::DarkGray)
             } else {
@@ -330,8 +307,8 @@ impl DiffState {
                 continue;
             }
 
-            for (fi, file) in repo.files.iter().enumerate() {
-                let is_expanded = self.expanded[ri][fi];
+            for file in &repo.files {
+                let is_expanded = file.expanded;
                 let arrow = if is_expanded { "▼" } else { "▶" };
                 let is_selected = row == self.cursor;
                 let fs = if is_selected {
@@ -424,6 +401,22 @@ impl DiffState {
         }
 
         lines
+    }
+}
+
+impl FlatRows for DiffState {
+    fn total(&self) -> usize {
+        self.total_rows()
+    }
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+    fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor;
+    }
+    /// Auto-expand the file the cursor just landed on (collapsing siblings).
+    fn on_step(&mut self) {
+        self.auto_expand_at_cursor();
     }
 }
 
@@ -526,7 +519,126 @@ fn parse_diff_files(diff_str: &str) -> Vec<DiffFile> {
                 removed,
                 kind,
                 lines,
+                expanded: false,
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diff_line() -> DiffLine {
+        DiffLine {
+            kind: DiffLineKind::Context,
+            source_line: Some(1),
+            target_line: Some(1),
+            content: "x".to_string(),
+        }
+    }
+
+    fn file(name: &str, n_lines: usize, expanded: bool) -> DiffFile {
+        DiffFile {
+            name: name.to_string(),
+            added: 0,
+            removed: 0,
+            kind: '~',
+            lines: (0..n_lines).map(|_| diff_line()).collect(),
+            expanded,
+        }
+    }
+
+    /// DIFF-truncation-count-eq-render (P0 / Step 11): total_rows must equal the
+    /// rendered row count even past MAX_LINES_PER_FILE — the truncated marker is
+    /// a real counted row. Red on old code: total counted all 600 lines while
+    /// render stopped at 500 + one "... truncated".
+    #[test]
+    fn diff_truncation_count_eq_render() {
+        // 600 lines: render shows 500 + truncated, total must agree.
+        let ds = DiffState {
+            repos: vec![RepoDiff {
+                path: "r".to_string(),
+                files: vec![file("a.rs", 600, true)],
+            }],
+            cursor: 0,
+        };
+        assert_eq!(ds.total_rows(), ds.render().len());
+        // Boundary: exactly 500 lines → no truncation marker, still equal.
+        let ds500 = DiffState {
+            repos: vec![RepoDiff {
+                path: "r".to_string(),
+                files: vec![file("a.rs", 500, true)],
+            }],
+            cursor: 0,
+        };
+        assert_eq!(ds500.total_rows(), ds500.render().len());
+    }
+
+    /// DIFF-pagedown-never-overruns-total (P0 / Step 11): a paged move that
+    /// auto-expands onto a small file (collapsing the large file0 mid-loop) must
+    /// never push the cursor past the (shrunken) total. Red on old code: it
+    /// cached `total` once against the large layout and kept incrementing.
+    #[test]
+    fn diff_pagedown_never_overruns_total() {
+        // file0 = 600 lines auto-expanded; one small collapsed file last.
+        // Layout (flat rows): repo hdr 0; big hdr 1; big 500 lines + trunc
+        // (2..502); small hdr 503. total = 1 + 502 + 1 = 504.
+        let ds_files = vec![file("big.rs", 600, false), file("small.rs", 3, false)];
+        let mut ds = DiffState::new(vec![RepoDiff {
+            path: "r".to_string(),
+            files: ds_files,
+        }]);
+        // Park the cursor on big.rs's last visible row, just before small.rs's
+        // header. The page steps onto small.rs (row 503), auto_expand collapses
+        // the 600-line big.rs (total 504 → 6) and resets the cursor low — then
+        // the loop keeps stepping. Old code cached total=504 once and walks the
+        // cursor far past the now-6-row set; the fix recomputes each step.
+        ds.cursor = ds.total_rows() - 2; // 502: last row of big.rs
+        ds.move_down_by(10);
+
+        let total = ds.total_rows();
+        assert!(
+            ds.cursor < total,
+            "cursor {} overran total {}",
+            ds.cursor,
+            total
+        );
+        // render() emits exactly total_rows() lines, so any cursor < total is a
+        // real rendered row.
+        assert!(ds.cursor < ds.render().len(), "cursor on an unrendered row");
+        assert!(ds.cursor_file().is_some() || ds.cursor < total);
+    }
+
+    /// DIFF-update-expansion-survives-count-change (P0 / Step 11 / S2): update()
+    /// must preserve a file's expansion by name across a file add/remove. Red on
+    /// old code: the count mismatch (2→3) threw away the whole repo's expanded
+    /// vec, snapping b.rs shut.
+    #[test]
+    fn diff_update_expansion_survives_count_change() {
+        let mut ds = DiffState::new(vec![RepoDiff {
+            path: "r".to_string(),
+            files: vec![file("a.rs", 10, false), file("b.rs", 20, false)],
+        }]);
+        // Expand b.rs explicitly (new() only auto-expands the first file).
+        ds.repos[0].files[1].expanded = true;
+        assert!(ds.repos[0].files[1].expanded);
+
+        // Update adds c.rs (count 2 → 3).
+        ds.update(vec![RepoDiff {
+            path: "r".to_string(),
+            files: vec![
+                file("a.rs", 10, false),
+                file("b.rs", 20, false),
+                file("c.rs", 5, false),
+            ],
+        }]);
+
+        let b = ds.repos[0]
+            .files
+            .iter()
+            .find(|f| f.name == "b.rs")
+            .expect("b.rs still present");
+        assert!(b.expanded, "b.rs expansion must survive the count change");
+    }
 }

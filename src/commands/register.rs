@@ -1,20 +1,19 @@
 use chrono::Utc;
 
-use crate::config::GroveConfig;
-use crate::db::{Db, RepoEntry};
+use crate::commands::rollback::StepJournal;
+use crate::commands::Ctx;
+use crate::db::RepoEntry;
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
 use crate::validation::validate_identifier;
 
-pub fn run(
-    name: &str,
-    url: &str,
-    config: &GroveConfig,
-    db: &Db,
-    json_mode: bool,
-    verbose: bool,
-) -> Result<(), GroveError> {
+pub fn run(name: &str, url: &str, ctx: &Ctx) -> Result<(), GroveError> {
+    let config = ctx.config;
+    let db = ctx.db;
+    let json_mode = ctx.json_mode;
+    let verbose = ctx.verbose;
+
     validate_identifier(name, "repo name")?;
 
     // Check if already registered
@@ -53,6 +52,12 @@ pub fn run(
 
     let default_branch = git::bare_clone(url, &bare_path, verbose)?;
 
+    // Journal the bare clone (N3: register orphaned it on DB failure); the DB
+    // write goes last inside a terminal tx so a failure rolls back and the
+    // journal removes the clone.
+    let mut journal = StepJournal::new(verbose);
+    journal.dir(&bare_path);
+
     let entry = RepoEntry {
         name: name.to_string(),
         url: url.to_string(),
@@ -62,7 +67,8 @@ pub fn run(
         last_synced_at: None,
     };
 
-    db.upsert_repo(&entry)?;
+    db.transaction(|| db.upsert_repo(&entry))?;
+    journal.commit();
 
     let data = serde_json::json!({
         "name": name,

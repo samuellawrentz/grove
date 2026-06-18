@@ -1,6 +1,7 @@
 pub(crate) mod actions;
 pub(crate) mod app;
 pub(crate) mod event;
+pub(crate) mod flat_rows;
 pub(crate) mod source;
 pub(crate) mod tree;
 pub(crate) mod ui;
@@ -14,6 +15,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use crate::config::GroveConfig;
+use crate::db::Db;
 use crate::error::GroveError;
 
 /// Guard that restores the terminal on drop.
@@ -31,8 +34,14 @@ fn restore_terminal() {
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
 }
 
-/// Entry point for the TUI.
-pub(crate) fn run(verbose: bool, popup: bool) -> Result<(), GroveError> {
+/// Entry point for the TUI. Takes ownership of the config (already resolved
+/// against `--config`) and the db handle, so the App owns both — no reload.
+pub(crate) fn run(
+    config: GroveConfig,
+    db: Db,
+    verbose: bool,
+    popup: bool,
+) -> Result<(), GroveError> {
     // Set up terminal
     enable_raw_mode().map_err(|e| GroveError::Tui(format!("failed to enable raw mode: {e}")))?;
     execute!(io::stdout(), EnterAlternateScreen)
@@ -60,7 +69,7 @@ pub(crate) fn run(verbose: bool, popup: bool) -> Result<(), GroveError> {
     // Register tmux hooks to track projects
     crate::tmux::register_project_hooks(verbose);
 
-    let mut app = app::App::new(verbose, popup)?;
+    let mut app = app::App::new(config, db, verbose, popup)?;
 
     let result = event::run_event_loop(&mut terminal, &mut app);
 

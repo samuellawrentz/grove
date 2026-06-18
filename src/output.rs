@@ -5,16 +5,23 @@ use crate::error::GroveError;
 /// Print a success response. In JSON mode, wraps data with `{ ok: true, ...data }`.
 /// In human mode, prints the human string.
 pub fn success(json_mode: bool, human: &str, data: Value) {
+    envelope(json_mode, true, human, data);
+}
+
+/// Print a response whose `ok` flag reflects actual success/partial-failure.
+/// In JSON mode, wraps data with `{ ok, ...data }` (ok first). In human mode,
+/// prints the human string. Use this when an operation can partially fail
+/// (e.g. sync) so the envelope does not lie about the outcome.
+pub fn envelope(json_mode: bool, ok: bool, human: &str, data: Value) {
     if json_mode {
-        let mut obj = match data {
+        let map = match data {
             Value::Object(map) => map,
             _ => serde_json::Map::new(),
         };
-        obj.insert("ok".to_string(), Value::Bool(true));
-        // Ensure "ok" is first by rebuilding
+        // Rebuild with "ok" first so the envelope flag leads the object.
         let mut ordered = serde_json::Map::new();
-        ordered.insert("ok".to_string(), Value::Bool(true));
-        for (k, v) in obj {
+        ordered.insert("ok".to_string(), Value::Bool(ok));
+        for (k, v) in map {
             if k != "ok" {
                 ordered.insert(k, v);
             }

@@ -2,6 +2,8 @@ use chrono::Utc;
 use dialoguer::{Input, MultiSelect};
 
 use crate::agent;
+use crate::commands::rollback::StepJournal;
+use crate::commands::Ctx;
 use crate::config::GroveConfig;
 use crate::db::{Db, TaskEntry, TaskRepo};
 use crate::error::GroveError;
@@ -18,6 +20,7 @@ pub struct InitOptions<'a> {
     pub interactive: bool,
     pub no_tmux: bool,
     pub no_claude: bool,
+    pub no_agent: bool,
     pub no_attach: bool,
     pub agent: Option<&'a str>,
 }
@@ -69,14 +72,32 @@ fn interactive_prompt(
     Ok((selected_repos, branch))
 }
 
-pub fn run(
-    task_id: &str,
-    opts: &InitOptions,
-    config: &GroveConfig,
-    db: &Db,
-    json_mode: bool,
-    verbose: bool,
-) -> Result<(), GroveError> {
+pub fn run(task_id: Option<&str>, opts: &InitOptions, ctx: &Ctx) -> Result<(), GroveError> {
+    let config = ctx.config;
+    let db = ctx.db;
+    let json_mode = ctx.json_mode;
+    let verbose = ctx.verbose;
+
+    let resolved_task_id = match task_id {
+        Some(id) => id.to_string(),
+        None => {
+            if !opts.interactive {
+                return Err(GroveError::General(
+                    "task_id is required (use -i for interactive mode)".to_string(),
+                ));
+            }
+            dialoguer::Input::new()
+                .with_prompt("Task ID")
+                .interact_text()
+                .map_err(|e| GroveError::General(format!("interactive input failed: {e}")))?
+        }
+    };
+    let task_id = resolved_task_id.as_str();
+
+    // Merge no_claude || no_agent into a single effective flag for the agent
+    // launch decision (preserves the old main.rs behavior).
+    let no_claude = opts.no_claude || opts.no_agent;
+
     validate_identifier(task_id, "task-id")?;
 
     let (resolved_repos, resolved_branch) = if opts.interactive {
@@ -110,11 +131,16 @@ pub fn run(
                     if repo_entry.path.exists() {
                         let _ =
                             git::run_git(&["worktree", "prune"], Some(&repo_entry.path), verbose);
-                        let _ = git::run_git(
-                            &["branch", "-D", &task_repo.branch],
-                            Some(&repo_entry.path),
-                            verbose,
-                        );
+                        // Safe delete (-d): preserve unmerged commits. Force
+                        // removal stays an explicit, user-driven action (close -D).
+                        if let Err(e) =
+                            git::delete_branch(&repo_entry.path, &task_repo.branch, false, verbose)
+                        {
+                            eprintln!(
+                                "Warning: kept unmerged branch '{}' for repo '{}' during stale re-init: {e}",
+                                task_repo.branch, task_repo.repo_name
+                            );
+                        }
                     }
                 }
             }
@@ -154,37 +180,30 @@ pub fn run(
     let task_dir = config.tasks_dir.join(task_id);
     std::fs::create_dir_all(&task_dir)?;
 
-    let mut created_worktrees: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    // Journal external side-effects; DB writes go last inside a terminal tx.
+    let mut journal = StepJournal::new(verbose);
+    journal.dir(&task_dir);
+
     let mut task_repos: Vec<TaskRepo> = Vec::new();
+    for repo_name in &resolved_repos {
+        let repo_entry = crate::commands::util::resolve_repo(&all_repos, repo_name)?;
+        let bare_path = &repo_entry.path;
+        let base_branch = opts.base.unwrap_or(&repo_entry.default_branch);
+        let worktree_path = task_dir.join(repo_name);
 
-    let create_result = (|| -> Result<(), GroveError> {
-        for repo_name in &resolved_repos {
-            let repo_entry = all_repos
-                .iter()
-                .find(|r| r.name == *repo_name)
-                .ok_or_else(|| GroveError::RepoNotRegistered(repo_name.clone()))?;
-            let bare_path = &repo_entry.path;
-            let base_branch = opts.base.unwrap_or(&repo_entry.default_branch);
-            let worktree_path = task_dir.join(repo_name);
+        let created_branch = !git::branch_exists(bare_path, branch_name, verbose);
+        git::create_worktree(bare_path, &worktree_path, branch_name, base_branch, verbose)?;
+        journal.worktree(
+            bare_path,
+            &worktree_path,
+            created_branch.then_some(branch_name.as_str()),
+        );
 
-            git::create_worktree(bare_path, &worktree_path, branch_name, base_branch, verbose)?;
-
-            created_worktrees.push((bare_path.clone(), worktree_path.clone()));
-            task_repos.push(TaskRepo {
-                repo_name: repo_name.clone(),
-                worktree_path,
-                branch: branch_name.to_string(),
-            });
-        }
-        Ok(())
-    })();
-
-    if let Err(e) = create_result {
-        for (bare_path, worktree_path) in created_worktrees.iter().rev() {
-            let _ = git::remove_worktree(bare_path, worktree_path, verbose);
-        }
-        let _ = std::fs::remove_dir_all(&task_dir);
-        return Err(e);
+        task_repos.push(TaskRepo {
+            repo_name: repo_name.clone(),
+            worktree_path,
+            branch: branch_name.to_string(),
+        });
     }
 
     let now = Utc::now();
@@ -206,6 +225,7 @@ pub fn run(
 
     let mut tmux_window: Option<String> = None;
     let mut pane_id: Option<String> = None;
+    let mut launched_kind: Option<agent::AgentKind> = None;
 
     if !opts.no_tmux {
         if !tmux::is_tmux_available() {
@@ -217,13 +237,14 @@ pub fn run(
                 eprintln!("Warning: not inside tmux, skipping window creation");
             }
         } else {
-            match create_tmux_window(task_id, &task_dir, opts, config, verbose) {
-                Ok((window, pane, launched_agent)) => {
-                    if let Some(kind) = launched_agent {
-                        let _ = db.record_pane_agent(&pane, &kind.to_string());
+            match create_tmux_window(task_id, &task_dir, opts, no_claude, config, verbose) {
+                Ok((window, pane, launched_agent, created)) => {
+                    if created {
+                        journal.tmux_window(&window);
                     }
                     tmux_window = Some(window);
                     pane_id = Some(pane);
+                    launched_kind = launched_agent;
                 }
                 Err(e) => {
                     eprintln!("Warning: tmux window creation failed: {e}");
@@ -240,8 +261,19 @@ pub fn run(
         tmux_window: tmux_window.clone(),
         pane_id: pane_id.clone(),
     };
-    db.upsert_task(&task_entry)?;
-    db.upsert_project(&task_dir.to_string_lossy())?;
+
+    // Terminal DB transaction: all DB writes go here, last, so a failure rolls
+    // itself back (no DB-inverse closures in the journal) and the journal then
+    // unwinds the external state. On success, commit() disarms the journal.
+    db.transaction(|| {
+        if let (Some(kind), Some(pane)) = (launched_kind, pane_id.as_deref()) {
+            crate::agent::PaneAgentStore::new(db).record(pane, kind)?;
+        }
+        db.upsert_task(&task_entry)?;
+        db.upsert_project(&task_dir.to_string_lossy())?;
+        Ok(())
+    })?;
+    journal.commit();
 
     if let Some(ref target) = tmux_window {
         if config.auto_attach && !opts.no_attach {
@@ -270,29 +302,35 @@ pub fn run(
     Ok(())
 }
 
+/// Returns `(window_target, pane_id, launched_kind, created)`. `created` is
+/// false when an existing window was reused, so the caller does not journal a
+/// kill-window undo for a window it did not create.
 fn create_tmux_window(
     task_id: &str,
     task_dir: &std::path::Path,
     opts: &InitOptions,
+    no_claude: bool,
     config: &GroveConfig,
     verbose: bool,
-) -> Result<(String, String, Option<agent::AgentKind>), GroveError> {
+) -> Result<(String, String, Option<agent::AgentKind>, bool), GroveError> {
     let session = tmux::current_session(verbose)?;
     let window_name = format!("{}-{}", config.tmux.session_prefix, task_id);
     let window_target = format!("{session}:{window_name}");
 
-    if tmux::window_exists(&session, &window_name, verbose) {
+    let created = if tmux::window_exists(&session, &window_name, verbose) {
         if verbose {
             eprintln!("tmux window '{window_name}' already exists, reusing");
         }
+        false
     } else {
         tmux::new_named_window(&session, &window_name, task_dir, verbose)?;
-    }
+        true
+    };
 
     let pane_id = tmux::get_pane_id(&window_target, verbose)?;
 
     let mut launched_kind: Option<agent::AgentKind> = None;
-    if !opts.no_claude && config.auto_launch_claude {
+    if !no_claude && config.auto_launch_claude {
         let agent_name = opts.agent.unwrap_or("claude");
         let cmd = config.resolved_agent_command(agent_name);
         agent::launch_in_pane(&window_target, &cmd, verbose)?;
@@ -300,5 +338,5 @@ fn create_tmux_window(
             agent::AgentKind::parse(agent_name).or_else(|| agent::AgentKind::from_command(&cmd));
     }
 
-    Ok((window_target, pane_id, launched_kind))
+    Ok((window_target, pane_id, launched_kind, created))
 }

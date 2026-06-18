@@ -60,6 +60,48 @@ pub struct Project {
 
 pub(crate) const DT_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
+/// Column list for task SELECTs, shared by `get_task` and `list_tasks` so the
+/// two read paths can't drift. Extraction is shared via `row_to_task_head`.
+const TASK_COLS: &str = "id, path, created_at, tmux_window, pane_id";
+
+/// Column list for repo SELECTs, shared by `get_repo` and `list_repos`.
+const REPO_COLS: &str = "name, url, path, default_branch, registered_at, last_synced_at";
+
+/// The five scalar task columns (`TASK_COLS` order). Repos are loaded separately.
+struct TaskHead {
+    id: String,
+    path: String,
+    created_at: String,
+    tmux_window: Option<String>,
+    pane_id: Option<String>,
+}
+
+/// Extract a `TaskHead` from a row selected with `TASK_COLS`. Used by both
+/// `get_task` and `list_tasks` so the column extraction lives in one place.
+fn row_to_task_head(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskHead> {
+    Ok(TaskHead {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        created_at: row.get(2)?,
+        tmux_window: row.get(3)?,
+        pane_id: row.get(4)?,
+    })
+}
+
+impl TaskHead {
+    /// Assemble a full `TaskEntry`, loading this task's repos.
+    fn into_entry(self, repos: Vec<TaskRepo>) -> TaskEntry {
+        TaskEntry {
+            id: self.id,
+            path: PathBuf::from(self.path),
+            created_at: str_to_dt(&self.created_at).unwrap_or_else(Utc::now),
+            tmux_window: self.tmux_window,
+            pane_id: self.pane_id,
+            repos,
+        }
+    }
+}
+
 fn dt_to_str(dt: DateTime<Utc>) -> String {
     dt.format(DT_FMT).to_string()
 }
@@ -87,8 +129,18 @@ impl Db {
         let dir = crate::config::grove_dir();
         std::fs::create_dir_all(&dir)?;
         let db = Self::open_path(&dir.join("grove.db"))?;
-        let _ = db.migrate_recents(&dir);
-        let _ = db.migrate_state_json(&dir);
+        // Legacy importers are best-effort (a missing/corrupt legacy file must
+        // not block opening), but failures are logged rather than swallowed.
+        match db.migrate_recents(&dir) {
+            Ok(n) if n > 0 => eprintln!("Imported {n} legacy recents"),
+            Err(e) => eprintln!("Warning: recents import failed: {e}"),
+            _ => {}
+        }
+        match db.migrate_state_json(&dir) {
+            Ok(n) if n > 0 => eprintln!("Imported {n} legacy state.json entries"),
+            Err(e) => eprintln!("Warning: state.json import failed: {e}"),
+            _ => {}
+        }
         Ok(db)
     }
 
@@ -96,11 +148,34 @@ impl Db {
         let conn = rusqlite::Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
         )?;
         let db = Db { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// Run `f` inside a single SQLite transaction.
+    ///
+    /// Commits on `Ok`, rolls back on `Err` (or any early `?`). Built on
+    /// `unchecked_transaction()` because grove's `Db` API is all-`&self`
+    /// (`conn.transaction()` needs `&mut`). Reentrant-safe: if a transaction
+    /// is already active, `f` runs inline and the outermost call owns
+    /// commit/rollback — so terminal-tx callers can freely invoke helpers
+    /// (`upsert_task`) that also wrap themselves here without a nested-BEGIN
+    /// error.
+    pub fn transaction<F, T>(&self, f: F) -> Result<T, GroveError>
+    where
+        F: FnOnce() -> Result<T, GroveError>,
+    {
+        if !self.conn.is_autocommit() {
+            return f();
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let value = f()?;
+        tx.commit()?;
+        Ok(value)
     }
 
     fn migrate(&self) -> Result<(), GroveError> {
@@ -123,13 +198,20 @@ impl Db {
             self.conn.execute_batch(SCHEMA_V4)?;
             self.conn.pragma_update(None, "user_version", 4)?;
         }
+        if version < 5 {
+            // Rebuild task_repos with ON DELETE CASCADE — SQLite can't ALTER a
+            // FK in place. Existing rows are FK-consistent so the copy passes
+            // with foreign_keys ON.
+            self.conn.execute_batch(SCHEMA_V5)?;
+            self.conn.pragma_update(None, "user_version", 5)?;
+        }
         Ok(())
     }
 
     // ── Pane agents ───────────────────────────────────────────────────────────
     // Authoritative record of agent kind for panes launched by grove.
 
-    pub fn record_pane_agent(&self, pane_id: &str, kind: &str) -> Result<(), GroveError> {
+    pub(crate) fn record_pane_agent(&self, pane_id: &str, kind: &str) -> Result<(), GroveError> {
         self.conn.execute(
             "INSERT INTO pane_agents (pane_id, agent_kind) VALUES (?1, ?2)
              ON CONFLICT(pane_id) DO UPDATE SET
@@ -140,7 +222,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn list_pane_agents(
+    pub(crate) fn list_pane_agents(
         &self,
     ) -> Result<std::collections::HashMap<String, String>, GroveError> {
         let mut stmt = self
@@ -157,8 +239,7 @@ impl Db {
         Ok(out)
     }
 
-    #[allow(dead_code)]
-    pub fn delete_pane_agent(&self, pane_id: &str) -> Result<(), GroveError> {
+    pub(crate) fn delete_pane_agent(&self, pane_id: &str) -> Result<(), GroveError> {
         self.conn
             .execute("DELETE FROM pane_agents WHERE pane_id = ?1", [pane_id])?;
         Ok(())
@@ -182,14 +263,11 @@ impl Db {
         Ok(())
     }
 
-    pub fn list_pane_overrides(&self) -> std::collections::HashSet<String> {
-        let Ok(mut stmt) = self.conn.prepare("SELECT pane_id FROM pane_overrides") else {
-            return std::collections::HashSet::new();
-        };
-        let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
-            return std::collections::HashSet::new();
-        };
-        rows.filter_map(Result::ok).collect()
+    pub fn list_pane_overrides(&self) -> Result<std::collections::HashSet<String>, GroveError> {
+        let mut stmt = self.conn.prepare("SELECT pane_id FROM pane_overrides")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(|e| GroveError::Database(e.to_string()))
     }
 
     // ── Projects ─────────────────────────────────────────────────────────────
@@ -408,10 +486,9 @@ impl Db {
     }
 
     pub fn get_repo(&self, name: &str) -> Result<Option<RepoEntry>, GroveError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, url, path, default_branch, registered_at, last_synced_at \
-             FROM repos WHERE name = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {REPO_COLS} FROM repos WHERE name = ?1"))?;
         let mut rows = stmt.query([name])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row_to_repo_entry(row)?))
@@ -421,10 +498,9 @@ impl Db {
     }
 
     pub fn list_repos(&self) -> Result<Vec<RepoEntry>, GroveError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, url, path, default_branch, registered_at, last_synced_at \
-             FROM repos ORDER BY name",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {REPO_COLS} FROM repos ORDER BY name"))?;
         let rows = stmt.query_map([], row_to_repo_entry)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| GroveError::Database(e.to_string()))
@@ -448,8 +524,7 @@ impl Db {
     // ── Tasks ─────────────────────────────────────────────────────────────────
 
     pub fn upsert_task(&self, task: &TaskEntry) -> Result<(), GroveError> {
-        self.conn.execute_batch("BEGIN")?;
-        let result = (|| -> Result<(), GroveError> {
+        self.transaction(|| {
             let path = task.path.to_string_lossy().to_string();
             let created_at = dt_to_str(task.created_at);
             self.conn.execute(
@@ -472,82 +547,42 @@ impl Db {
                 )?;
             }
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        })
     }
 
     pub fn get_task(&self, id: &str) -> Result<Option<TaskEntry>, GroveError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, created_at, tmux_window, pane_id FROM tasks WHERE id = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {TASK_COLS} FROM tasks WHERE id = ?1"))?;
         let mut rows = stmt.query([id])?;
         if let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let path: String = row.get(1)?;
-            let created_at_str: String = row.get(2)?;
-            let tmux_window: Option<String> = row.get(3)?;
-            let pane_id: Option<String> = row.get(4)?;
-            let created_at = str_to_dt(&created_at_str).unwrap_or_else(Utc::now);
-            let repos = self.load_task_repos(&id)?;
-            Ok(Some(TaskEntry {
-                id,
-                path: PathBuf::from(path),
-                created_at,
-                tmux_window,
-                pane_id,
-                repos,
-            }))
+            let head = row_to_task_head(row)?;
+            let repos = self.load_task_repos(&head.id)?;
+            Ok(Some(head.into_entry(repos)))
         } else {
             Ok(None)
         }
     }
 
     pub fn list_tasks(&self) -> Result<Vec<TaskEntry>, GroveError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, created_at, tmux_window, pane_id FROM tasks ORDER BY created_at DESC",
-        )?;
-        #[allow(clippy::type_complexity)]
-        let ids: Vec<(String, String, String, Option<String>, Option<String>)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })?
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLS} FROM tasks ORDER BY created_at DESC"
+        ))?;
+        let heads: Vec<TaskHead> = stmt
+            .query_map([], row_to_task_head)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| GroveError::Database(e.to_string()))?;
 
-        let mut tasks = Vec::with_capacity(ids.len());
-        for (id, path, created_at_str, tmux_window, pane_id) in ids {
-            let created_at = str_to_dt(&created_at_str).unwrap_or_else(Utc::now);
-            let repos = self.load_task_repos(&id)?;
-            tasks.push(TaskEntry {
-                id,
-                path: PathBuf::from(path),
-                created_at,
-                tmux_window,
-                pane_id,
-                repos,
-            });
+        let mut tasks = Vec::with_capacity(heads.len());
+        for head in heads {
+            let repos = self.load_task_repos(&head.id)?;
+            tasks.push(head.into_entry(repos));
         }
         Ok(tasks)
     }
 
     pub fn delete_task(&self, id: &str) -> Result<(), GroveError> {
-        self.conn
-            .execute("DELETE FROM task_repos WHERE task_id = ?1", [id])?;
+        // task_repos rows cascade-delete via the FK (SCHEMA_V5 + foreign_keys=ON).
         self.conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         Ok(())
     }
@@ -643,6 +678,22 @@ CREATE TABLE IF NOT EXISTS pane_overrides (
 );
 ";
 
+// Rebuild task_repos with ON DELETE CASCADE. SQLite cannot add a FK action via
+// ALTER, so the table is recreated and its rows copied across.
+const SCHEMA_V5: &str = "
+CREATE TABLE task_repos_v5 (
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    repo_name   TEXT NOT NULL,
+    worktree    TEXT NOT NULL,
+    branch      TEXT NOT NULL,
+    PRIMARY KEY (task_id, repo_name)
+);
+INSERT INTO task_repos_v5 (task_id, repo_name, worktree, branch)
+    SELECT task_id, repo_name, worktree, branch FROM task_repos;
+DROP TABLE task_repos;
+ALTER TABLE task_repos_v5 RENAME TO task_repos;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,24 +714,24 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
     fn test_pane_overrides_roundtrip() {
         let db = open_temp();
-        assert!(db.list_pane_overrides().is_empty());
+        assert!(db.list_pane_overrides().unwrap().is_empty());
 
         db.mark_pane_other("%5").unwrap();
         db.mark_pane_other("%5").unwrap(); // idempotent
         db.mark_pane_other("%9").unwrap();
-        let marks = db.list_pane_overrides();
+        let marks = db.list_pane_overrides().unwrap();
         assert!(marks.contains("%5"));
         assert!(marks.contains("%9"));
         assert_eq!(marks.len(), 2);
 
         db.unmark_pane_other("%5").unwrap();
-        let marks = db.list_pane_overrides();
+        let marks = db.list_pane_overrides().unwrap();
         assert!(!marks.contains("%5"));
         assert!(marks.contains("%9"));
     }
@@ -829,5 +880,171 @@ mod tests {
         db.save_note("/tmp/b", "note b").unwrap();
         assert_eq!(db.get_note("/tmp/a").unwrap().unwrap(), "note a");
         assert_eq!(db.get_note("/tmp/b").unwrap().unwrap(), "note b");
+    }
+
+    // ── Step 1: transaction authority + FK + cascade ────────────────────────────
+
+    /// DB-foreign-keys-pragma-on (P0 / B3): open_path must enable FK enforcement.
+    #[test]
+    fn foreign_keys_pragma_on() {
+        let db = open_temp();
+        let fk: i64 = db
+            .conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "foreign_keys must be ON after open_path");
+    }
+
+    /// DB-cascade-clears-task_repos (P0 / B3): a raw DELETE FROM tasks must
+    /// cascade to task_repos (proves the FK action is live, not just delete_task's
+    /// manual cleanup).
+    #[test]
+    fn cascade_clears_task_repos() {
+        let db = open_temp();
+        let mut task = make_task("TASK-1");
+        task.repos.push(TaskRepo {
+            repo_name: "other".to_string(),
+            worktree_path: PathBuf::from("/tmp/worktrees/other"),
+            branch: "feat/other".to_string(),
+        });
+        db.upsert_task(&task).unwrap();
+
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // delete_task collapses to one statement and relies on the cascade.
+        db.delete_task("TASK-1").unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "delete_task must cascade task_repos");
+
+        // A raw tasks-delete (bypassing the helper) must also cascade.
+        db.upsert_task(&task).unwrap();
+        db.conn
+            .execute("DELETE FROM tasks WHERE id = ?1", ["TASK-1"])
+            .unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "FK cascade must fire on a raw tasks delete");
+    }
+
+    /// TX-transaction-helper-rolls-back-on-err (P1 / B3, S-C).
+    #[test]
+    fn transaction_rolls_back_on_err() {
+        let db = open_temp();
+        let res: Result<(), GroveError> = db.transaction(|| {
+            db.upsert_repo(&make_repo("rollme"))?;
+            Err(GroveError::General("boom".into()))
+        });
+        assert!(res.is_err());
+        assert!(
+            db.get_repo("rollme").unwrap().is_none(),
+            "write must be rolled back when the closure returns Err"
+        );
+    }
+
+    /// TX-transaction-helper-commits-on-ok (P2 / B3, S-C).
+    #[test]
+    fn transaction_commits_on_ok() {
+        let db = open_temp();
+        db.transaction(|| {
+            db.upsert_repo(&make_repo("a"))?;
+            db.upsert_repo(&make_repo("b"))?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.get_repo("a").unwrap().is_some());
+        assert!(db.get_repo("b").unwrap().is_some());
+    }
+
+    /// TX-v4-to-v5-migration-preserves-rows-and-adds-cascade (P1 / B3).
+    #[test]
+    fn v4_to_v5_migration_preserves_rows_and_adds_cascade() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        std::mem::forget(f);
+
+        // Build a V4 database with the legacy (no-cascade) task_repos schema.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch(SCHEMA_V3).unwrap();
+            conn.execute_batch(SCHEMA_V4).unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, path, created_at) VALUES ('T', '/tmp/T', '2024-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_repos (task_id, repo_name, worktree, branch) VALUES ('T','r1','/tmp/T/r1','b1')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_repos (task_id, repo_name, worktree, branch) VALUES ('T','r2','/tmp/T/r2','b2')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+
+        // Re-open via grove → runs the V4→V5 migration.
+        let db = Db::open_path(&path).unwrap();
+        let version: u32 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+
+        let task = db.get_task("T").unwrap().unwrap();
+        assert_eq!(task.repos.len(), 2, "both repos preserved across migration");
+
+        // Cascade is now live.
+        db.delete_task("T").unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// TX-get-task-equals-list-tasks-row (P1, Step 12): the two read paths must
+    /// return identical rows — including the None-column variant.
+    #[test]
+    fn get_task_equals_list_tasks_row() {
+        for (id, win, pane) in [
+            ("WITH", Some("s:w".to_string()), Some("%9".to_string())),
+            ("NONE", None, None),
+        ] {
+            let db = open_temp();
+            let mut task = make_task(id);
+            task.tmux_window = win;
+            task.pane_id = pane;
+            db.upsert_task(&task).unwrap();
+
+            let via_get = db.get_task(id).unwrap().unwrap();
+            let listed = db.list_tasks().unwrap();
+            let via_list = listed.iter().find(|t| t.id == id).unwrap();
+
+            assert_eq!(via_get.id, via_list.id);
+            assert_eq!(via_get.path, via_list.path);
+            assert_eq!(via_get.created_at, via_list.created_at);
+            assert_eq!(via_get.tmux_window, via_list.tmux_window);
+            assert_eq!(via_get.pane_id, via_list.pane_id);
+            assert_eq!(via_get.repos.len(), via_list.repos.len());
+            for (a, b) in via_get.repos.iter().zip(&via_list.repos) {
+                assert_eq!(a.repo_name, b.repo_name);
+                assert_eq!(a.worktree_path, b.worktree_path);
+                assert_eq!(a.branch, b.branch);
+            }
+        }
     }
 }

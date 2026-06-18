@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use super::app::{App, Focus, SidebarFocus};
+use super::app::{App, Focus, Overlay, SidebarFocus};
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY, TERMINAL_ICON};
 
 /// Draw the TUI frame.
@@ -38,7 +38,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     draw_status_bar(f, app, outer[1]);
 
     // Draw prompt modal overlay on top of everything
-    if let Some(ref input) = app.prompt_input {
+    if let Overlay::Prompt(ref input) = app.overlay {
         draw_prompt_modal(f, input);
     }
 }
@@ -123,7 +123,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                                 AgentState::Active => Color::Green,
                                 AgentState::Waiting => Color::Yellow,
                                 AgentState::Idle => Color::Cyan,
-                                AgentState::NotRunning => Color::DarkGray,
+                                AgentState::Unknown | AgentState::NotRunning => Color::DarkGray,
                             };
                             (icon, color)
                         }
@@ -405,8 +405,8 @@ fn draw_prompt_modal(f: &mut Frame, input: &str) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let content = if app.open_prompt_dir.is_some() {
-        Line::from(vec![
+    let content = match app.overlay {
+        Overlay::OpenChoice { .. } => Line::from(vec![
             Span::styled("Open: ", Style::default().fg(Color::Cyan)),
             Span::styled("[c]", Style::default().fg(Color::White)),
             Span::styled("laude  ", Style::default().fg(Color::DarkGray)),
@@ -421,14 +421,23 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::styled("[e]", Style::default().fg(Color::White)),
             Span::styled("ditor  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Esc:cancel", Style::default().fg(Color::DarkGray)),
-        ])
-    } else if let Some(ref query) = app.search_input {
-        Line::from(vec![
+        ]),
+        Overlay::Search { ref query, .. } => Line::from(vec![
             Span::styled("/ ", Style::default().fg(Color::Cyan)),
             Span::raw(query.as_str()),
             Span::styled("_", Style::default().fg(Color::Cyan)),
-        ])
-    } else if let Some(ref msg) = app.status_message {
+        ]),
+        Overlay::Prompt(_) | Overlay::None => status_or_hint(app),
+    };
+
+    let bar = Paragraph::new(content).wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(bar, area);
+}
+
+/// The non-overlay status bar content: a transient status message, else the
+/// context-sensitive key hints.
+fn status_or_hint(app: &App) -> Line<'_> {
+    if let Some(ref msg) = app.status_message {
         Line::from(Span::styled(
             msg.as_str(),
             Style::default().fg(Color::Yellow),
@@ -449,8 +458,5 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             }
         };
         Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
-    };
-
-    let bar = Paragraph::new(content).wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(bar, area);
+    }
 }

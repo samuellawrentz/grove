@@ -1,22 +1,22 @@
 use dialoguer::Select;
 
-use crate::config::GroveConfig;
+use crate::commands::Ctx;
 use crate::db::Db;
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     task_id: Option<&str>,
     force: bool,
     delete_branches: bool,
     interactive: bool,
-    _config: &GroveConfig,
-    db: &Db,
-    json_mode: bool,
-    verbose: bool,
+    ctx: &Ctx,
 ) -> Result<(), GroveError> {
+    let db = ctx.db;
+    let json_mode = ctx.json_mode;
+    let verbose = ctx.verbose;
+
     let resolved_id = match task_id {
         Some(id) => id.to_string(),
         None if interactive => interactive_select_task(db)?,
@@ -68,6 +68,8 @@ pub fn run(
 
     let all_repos = db.list_repos()?;
 
+    // One pass per task_repo: resolve the bare path once, remove the worktree
+    // (worktree-before-branch ordering preserved), then delete the branch + prune.
     for task_repo in &task.repos {
         let bare_path = all_repos
             .iter()
@@ -91,6 +93,31 @@ pub fn run(
                     }
                 }
                 repos_closed.push(task_repo.repo_name.clone());
+
+                // Always clean up the task branch. By default use a safe delete
+                // (merged-only) so unmerged work is preserved; `--delete-branches/-D`
+                // force-deletes regardless.
+                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose)
+                {
+                    if delete_branches {
+                        warnings.push(format!(
+                            "failed to delete branch '{}' from '{}': {e}",
+                            task_repo.branch, task_repo.repo_name
+                        ));
+                    } else {
+                        warnings.push(format!(
+                            "branch '{}' in '{}' is not merged; kept it. \
+                             Re-run with --delete-branches/-D to force-delete.",
+                            task_repo.branch, task_repo.repo_name
+                        ));
+                    }
+                }
+                if let Err(e) = git::prune_worktrees(&bp, verbose) {
+                    warnings.push(format!(
+                        "failed to prune worktrees for '{}': {e}",
+                        task_repo.repo_name
+                    ));
+                }
             }
             Some(_) => {
                 let warn = format!(
@@ -117,46 +144,26 @@ pub fn run(
         }
     }
 
-    // Always clean up the task branch. By default use a safe delete (merged-only)
-    // so unmerged work is preserved; `--delete-branches/-D` force-deletes regardless.
-    for task_repo in &task.repos {
-        let bare_path = all_repos
-            .iter()
-            .find(|r| r.name == task_repo.repo_name)
-            .map(|r| r.path.clone());
-
-        if let Some(bp) = bare_path {
-            if bp.exists() {
-                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose)
-                {
-                    if delete_branches {
-                        warnings.push(format!(
-                            "failed to delete branch '{}' from '{}': {e}",
-                            task_repo.branch, task_repo.repo_name
-                        ));
-                    } else {
-                        warnings.push(format!(
-                            "branch '{}' in '{}' is not merged; kept it. \
-                             Re-run with --delete-branches/-D to force-delete.",
-                            task_repo.branch, task_repo.repo_name
-                        ));
-                    }
-                }
-                if let Err(e) = git::prune_worktrees(&bp, verbose) {
-                    warnings.push(format!(
-                        "failed to prune worktrees for '{}': {e}",
-                        task_repo.repo_name
-                    ));
-                }
-            }
+    // Tolerate an already-gone or unremovable path: the DB row must be cleared
+    // regardless so close is idempotent and never strands a task row (N4).
+    if task.path.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&task.path) {
+            warnings.push(format!("failed to remove task directory: {e}"));
         }
     }
 
-    if task.path.exists() {
-        std::fs::remove_dir_all(&task.path)?;
-    }
-
     db.delete_task(task_id)?;
+
+    // Clean up the task's tmux pane bookkeeping so a recycled pane id can't
+    // resurrect this task's agent kind or "others" mark.
+    if let Some(pid) = task.pane_id.as_deref() {
+        if let Err(e) = crate::agent::PaneAgentStore::new(db).remove(pid) {
+            warnings.push(format!("failed to clear pane agent for '{pid}': {e}"));
+        }
+        if let Err(e) = db.unmark_pane_other(pid) {
+            warnings.push(format!("failed to unmark pane '{pid}': {e}"));
+        }
+    }
 
     let data = serde_json::json!({
         "task_id": task_id,

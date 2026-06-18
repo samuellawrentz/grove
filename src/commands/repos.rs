@@ -1,8 +1,11 @@
-use crate::db::Db;
+use crate::commands::Ctx;
 use crate::error::GroveError;
 use crate::output;
 
-pub fn run(db: &Db, json_mode: bool) -> Result<(), GroveError> {
+pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
+    let db = ctx.db;
+    let json_mode = ctx.json_mode;
+
     let repos = db.list_repos()?;
     if repos.is_empty() {
         let data = serde_json::json!({ "repos": [] });

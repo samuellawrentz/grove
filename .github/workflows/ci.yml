@@ -30,6 +30,9 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
+      - name: Structural checks (G1-G3)
+        run: ./scripts/structural-checks.sh
+
       - name: Run tests
         run: cargo test --verbose
 

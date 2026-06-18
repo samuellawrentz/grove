@@ -12,7 +12,7 @@ use ratatui::Terminal;
 use crate::error::GroveError;
 
 use super::actions;
-use super::app::App;
+use super::app::{App, Overlay, PendingShell};
 use super::ui;
 
 /// Suspend the TUI, run a closure, then restore the terminal.
@@ -73,68 +73,72 @@ pub(crate) fn run_event_loop(
             }
         }
 
-        // Handle pending shell-out: suspend TUI, run command, resume
-        if let Some(cmd) = app.pending_popup.take() {
-            suspend_tui(terminal, || {
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .status();
+        // Drain a one-shot deferred shell side-effect: suspend TUI, run, resume.
+        match std::mem::replace(&mut app.pending_shell, PendingShell::None) {
+            PendingShell::Popup(cmd) => {
+                suspend_tui(terminal, || {
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .status();
 
-                match &status {
-                    Ok(s) if !s.success() => {
-                        eprintln!("\n[grove] command exited with {s}");
+                    match &status {
+                        Ok(s) if !s.success() => {
+                            eprintln!("\n[grove] command exited with {s}");
+                        }
+                        Err(e) => {
+                            eprintln!("\n[grove] command failed: {e}");
+                        }
+                        _ => {}
                     }
-                    Err(e) => {
-                        eprintln!("\n[grove] command failed: {e}");
+
+                    eprintln!("[grove] Press Enter to return to TUI...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    if let Err(e) = status {
+                        app.status_message = Some(format!("command failed: {e}"));
                     }
-                    _ => {}
-                }
+                });
 
-                eprintln!("[grove] Press Enter to return to TUI...");
-                let _ = std::io::stdin().read_line(&mut String::new());
-
-                if let Err(e) = status {
-                    app.status_message = Some(format!("command failed: {e}"));
-                }
-            });
-
-            app.refresh_tree();
-            app.refresh_preview();
-        }
-
-        // Handle fzf directory picker → sets open_prompt_dir for sub-choice
-        if std::mem::take(&mut app.pending_fzf) {
-            let result = suspend_tui(terminal, || {
-                std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg("{ grove list --json 2>/dev/null | jq -r '.tasks[].path // empty' 2>/dev/null; zoxide query -l 2>/dev/null; } | awk '!seen[$0]++' | fzf --prompt='Directory> '")
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::inherit())
-                    .output()
-            });
-
-            if let Ok(output) = result {
-                if output.status.success() {
-                    let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !dir.is_empty() {
-                        app.open_prompt_dir = Some(dir);
-                    }
-                }
+                app.refresh_tree();
+                app.refresh_preview();
             }
+            PendingShell::FzfPicker => {
+                // fzf directory picker → opens the open-prompt sub-choice overlay
+                let result = suspend_tui(terminal, || {
+                    std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("{ grove list --json 2>/dev/null | jq -r '.tasks[].path // empty' 2>/dev/null; zoxide query -l 2>/dev/null; } | awk '!seen[$0]++' | fzf --prompt='Directory> '")
+                        .stdin(std::process::Stdio::inherit())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::inherit())
+                        .output()
+                });
 
-            app.refresh_tree();
-            app.refresh_preview();
+                if let Ok(output) = result {
+                    if output.status.success() {
+                        let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !dir.is_empty() {
+                            app.overlay = Overlay::OpenChoice { dir };
+                        }
+                    }
+                }
+
+                app.refresh_tree();
+                app.refresh_preview();
+            }
+            PendingShell::None => {}
         }
 
-        if !has_event {
+        // Background refresh is gated on no active overlay so a tmux hook firing
+        // mid-search/-prompt can't rebuild the tree and yank the cursor.
+        if !has_event && !app.overlay_active() {
             // Timeout: refresh data
             app.on_tick();
         }
 
-        // Check SIGUSR1 flag
-        if sigusr1_flag.swap(false, Ordering::Relaxed) {
+        // Check SIGUSR1 flag (also gated on overlay state)
+        if sigusr1_flag.swap(false, Ordering::Relaxed) && !app.overlay_active() {
             app.refresh_tree();
         }
     }

@@ -1,20 +1,22 @@
-use crate::db::{Db, TaskRepo};
+use crate::commands::rollback::StepJournal;
+use crate::commands::Ctx;
+use crate::db::TaskRepo;
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
 use crate::validation::validate_identifier;
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     task_id: &str,
     repo_name: &str,
     branch: Option<&str>,
     base: Option<&str>,
-    _config: &crate::config::GroveConfig,
-    db: &Db,
-    json_mode: bool,
-    verbose: bool,
+    ctx: &Ctx,
 ) -> Result<(), GroveError> {
+    let db = ctx.db;
+    let json_mode = ctx.json_mode;
+    let verbose = ctx.verbose;
+
     validate_identifier(repo_name, "repo")?;
 
     let mut task = db
@@ -43,6 +45,7 @@ pub fn run(
         .map(String::from)
         .unwrap_or_else(|| repo_entry.default_branch.clone());
 
+    let created_branch = !git::branch_exists(&bare_path, &branch_name, verbose);
     git::create_worktree(
         &bare_path,
         &worktree_path,
@@ -51,12 +54,22 @@ pub fn run(
         verbose,
     )?;
 
+    // Journal the worktree (B2: add had zero rollback); the DB write goes last
+    // inside a terminal tx so a failure rolls back and the journal unwinds.
+    let mut journal = StepJournal::new(verbose);
+    journal.worktree(
+        &bare_path,
+        &worktree_path,
+        created_branch.then_some(branch_name.as_str()),
+    );
+
     task.repos.push(TaskRepo {
         repo_name: repo_name.to_string(),
         worktree_path: worktree_path.clone(),
         branch: branch_name.clone(),
     });
-    db.upsert_task(&task)?;
+    db.transaction(|| db.upsert_task(&task))?;
+    journal.commit();
 
     let data = serde_json::json!({
         "task_id": task_id,

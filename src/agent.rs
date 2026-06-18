@@ -4,10 +4,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::db::TaskEntry;
+use crate::db::{Db, TaskEntry};
 use crate::error::GroveError;
 use crate::tmux::{self, PaneInfo};
 
@@ -30,24 +29,21 @@ pub enum AgentKind {
 
 impl fmt::Display for AgentKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Claude => write!(f, "claude"),
-            Self::OpenCode => write!(f, "opencode"),
-            Self::Codex => write!(f, "codex"),
-            Self::Cursor => write!(f, "cursor"),
-        }
+        let wire = AGENT_REGISTRY
+            .iter()
+            .find(|def| def.kind == *self)
+            .map(|def| def.wire_name)
+            .unwrap_or("unknown");
+        write!(f, "{wire}")
     }
 }
 
 impl AgentKind {
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "claude" => Some(Self::Claude),
-            "opencode" => Some(Self::OpenCode),
-            "codex" => Some(Self::Codex),
-            "cursor" => Some(Self::Cursor),
-            _ => None,
-        }
+        AGENT_REGISTRY
+            .iter()
+            .find(|def| def.wire_name == s)
+            .map(|def| def.kind)
     }
 
     /// Match a command line (binary path or argv) against the registry.
@@ -68,6 +64,9 @@ pub enum AgentState {
     /// Agent finished its turn (Stop hook fired) and is awaiting the user's
     /// next input. Distinct from `NotRunning`: the agent is alive, just idle.
     Idle,
+    /// We know the agent KIND but have no live STATE signal. Must NOT be
+    /// treated as actively working.
+    Unknown,
     #[serde(other)]
     NotRunning,
 }
@@ -78,6 +77,7 @@ impl fmt::Display for AgentState {
             Self::Active => write!(f, "active"),
             Self::Waiting => write!(f, "waiting"),
             Self::Idle => write!(f, "idle"),
+            Self::Unknown => write!(f, "unknown"),
             Self::NotRunning => write!(f, "not running"),
         }
     }
@@ -97,22 +97,11 @@ pub struct AgentInfo {
 }
 
 #[allow(dead_code)]
-pub enum DetectStrategy {
-    StateFile {
-        path: &'static str,
-    },
-    PaneScrape {
-        active_re: Option<Regex>,
-        waiting_re: Option<Regex>,
-        approval_re: Regex,
-    },
-}
-
-#[allow(dead_code)]
 pub struct AgentDef {
     pub kind: AgentKind,
+    pub wire_name: &'static str,
+    pub launch_key: char,
     pub command_names: &'static [&'static str],
-    pub detect: DetectStrategy,
     pub icon: &'static str,
     pub accept_keys: &'static [&'static str],
     pub reject_keys: &'static [&'static str],
@@ -126,8 +115,9 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
     vec![
         AgentDef {
             kind: AgentKind::Claude,
+            wire_name: "claude",
+            launch_key: 'c',
             command_names: &["claude"],
-            detect: DetectStrategy::StateFile { path: "/tmp/claude-panes.json" },
             icon: "󰚩",
             accept_keys: &["Enter"],
             reject_keys: &["n", "Enter"],
@@ -136,12 +126,9 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
         },
         AgentDef {
             kind: AgentKind::OpenCode,
+            wire_name: "opencode",
+            launch_key: 'o',
             command_names: &["opencode"],
-            detect: DetectStrategy::PaneScrape {
-                active_re: Some(Regex::new(r"(?i)(generating|streaming|tool:|reading|writing|searching)").unwrap()),
-                waiting_re: Some(Regex::new(r"(?i)(>\s*$|waiting for input|idle)").unwrap()),
-                approval_re: Regex::new(r"(?i)(approve|deny|allow|reject|\[y/n\]|\[yes/no\])").unwrap(),
-            },
             icon: "󰘦",
             accept_keys: &["y", "Enter"],
             reject_keys: &["n", "Enter"],
@@ -150,12 +137,9 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
         },
         AgentDef {
             kind: AgentKind::Codex,
+            wire_name: "codex",
+            launch_key: 'x',
             command_names: &["codex"],
-            detect: DetectStrategy::PaneScrape {
-                active_re: None,
-                waiting_re: Some(Regex::new(r"(?i)(>\s*$)").unwrap()),
-                approval_re: Regex::new(r"(?i)(Would you like to run|Would you like to make|Allow Codex to|Approve app tool call|Do you trust the contents|Enable full access)").unwrap(),
-            },
             icon: "󰅪",
             accept_keys: &["y", "Enter"],
             reject_keys: &["n", "Enter"],
@@ -164,12 +148,9 @@ pub static AGENT_REGISTRY: LazyLock<Vec<AgentDef>> = LazyLock::new(|| {
         },
         AgentDef {
             kind: AgentKind::Cursor,
+            wire_name: "cursor",
+            launch_key: 'u',
             command_names: &["cursor"],
-            detect: DetectStrategy::PaneScrape {
-                active_re: None,
-                waiting_re: Some(Regex::new(r"(?i)(>\s*$|waiting)").unwrap()),
-                approval_re: Regex::new(r"(?i)(\[y/n\]|\[yes/no\]|confirm|approve)").unwrap(),
-            },
             icon: "󰆍",
             accept_keys: &["Enter"],
             reject_keys: &["n", "Enter"],
@@ -284,39 +265,6 @@ pub fn identify_agent(pane: &PaneInfo) -> Option<&'static AgentDef> {
     })
 }
 
-/// Scrape pane content to detect agent state. Only for PaneScrape agents.
-#[allow(dead_code)]
-pub fn scrape_pane_state(pane_id: &str, def: &AgentDef, verbose: bool) -> AgentState {
-    let content = match tmux::capture_pane_tail(pane_id, 20, verbose) {
-        Ok(c) => c,
-        Err(_) => return AgentState::NotRunning,
-    };
-
-    if let DetectStrategy::PaneScrape {
-        active_re,
-        waiting_re,
-        approval_re,
-    } = &def.detect
-    {
-        if approval_re.is_match(&content) {
-            return AgentState::Waiting;
-        }
-        if let Some(re) = active_re {
-            if re.is_match(&content) {
-                return AgentState::Active;
-            }
-        }
-        if let Some(re) = waiting_re {
-            if re.is_match(&content) {
-                return AgentState::NotRunning;
-            }
-        }
-        AgentState::Active
-    } else {
-        AgentState::NotRunning
-    }
-}
-
 /// Cache of resolved agent kinds keyed by pane_id. Invalidated when the pane's
 /// pid changes (which means the pane was respawned or the agent process exited).
 #[derive(Clone, Copy)]
@@ -401,50 +349,127 @@ fn process_command(pid: u32) -> Option<String> {
     }
 }
 
-/// Detect agent + state, in priority order:
-///   1. external Claude state file (pane_id → state)
-///   2. grove-recorded kind from DB (pane_id → kind, set at launch)
-///   3. tmux `current_command` / `start_command` substring match
-///   4. process-tree walk (e.g. `cursor` running as a `node` subprocess)
+/// The three identity signals a pane can carry, keyed by pane_id.
+pub struct AgentSources {
+    /// Live state reported by the agent hook (state file).
+    pub state_map: HashMap<String, AgentState>,
+    /// Kind declared by the agent in the state file.
+    pub state_kind_map: HashMap<String, AgentKind>,
+    /// Kind recorded by grove at launch (DB).
+    pub db_kind_map: HashMap<String, AgentKind>,
+}
+
+/// Resolves a pane's agent identity + state from the available sources.
+pub struct AgentResolver;
+
+impl AgentResolver {
+    /// Resolve agent + state, in priority order:
+    ///   1. live state file → kind from declared/recorded (default Claude), real state
+    ///   2. grove-recorded kind (DB) → kind known, state Unknown (no live signal)
+    ///   3. tmux `current_command` / `start_command` substring match → Unknown
+    ///   4. process-tree walk (e.g. `cursor` running as a `node` subprocess) → Unknown
+    ///
+    /// A kind-known-but-state-unknown pane must NOT be reported as active: a
+    /// grove-launched pane whose hook never fired should show `Unknown`, not a
+    /// stuck `Active`.
+    pub fn resolve(pane: &PaneInfo, sources: &AgentSources) -> Option<AgentInfo> {
+        // 1. State file (agent hook). Use the declared/recorded kind if known,
+        //    falling back to Claude for legacy entries that carry no kind.
+        if let Some(state) = sources.state_map.get(&pane.pane_id) {
+            let kind = sources
+                .state_kind_map
+                .get(&pane.pane_id)
+                .or_else(|| sources.db_kind_map.get(&pane.pane_id))
+                .copied()
+                .unwrap_or(AgentKind::Claude);
+            return Some(AgentInfo {
+                kind,
+                state: state.clone(),
+            });
+        }
+        // 2. Grove-recorded kind (authoritative for panes grove launched). No
+        //    live state signal yet → Unknown, never Active.
+        if let Some(kind) = sources.db_kind_map.get(&pane.pane_id) {
+            return Some(AgentInfo {
+                kind: *kind,
+                state: AgentState::Unknown,
+            });
+        }
+        // 3. tmux command-name substring match
+        if let Some(def) = identify_agent(pane) {
+            return Some(AgentInfo {
+                kind: def.kind,
+                state: AgentState::Unknown,
+            });
+        }
+        // 4. Process-tree fallback
+        if let Some(kind) = detect_via_process_tree(pane) {
+            return Some(AgentInfo {
+                kind,
+                state: AgentState::Unknown,
+            });
+        }
+        None
+    }
+}
+
+/// Thin wrapper preserved for callers that already merged state-file kinds into
+/// `recorded_kinds`. Builds an `AgentSources` and delegates to `AgentResolver`.
 pub fn detect_agent_in_pane(
     pane: &PaneInfo,
     state_file_states: &HashMap<String, AgentState>,
     recorded_kinds: &HashMap<String, AgentKind>,
 ) -> Option<AgentInfo> {
-    // 1. State file (agent hook). Use the recorded/declared kind if known,
-    //    falling back to Claude for legacy entries that carry no kind.
-    if let Some(state) = state_file_states.get(&pane.pane_id) {
-        let kind = recorded_kinds
-            .get(&pane.pane_id)
-            .copied()
-            .unwrap_or(AgentKind::Claude);
-        return Some(AgentInfo {
-            kind,
-            state: state.clone(),
-        });
+    let sources = AgentSources {
+        state_map: state_file_states.clone(),
+        state_kind_map: HashMap::new(),
+        db_kind_map: recorded_kinds.clone(),
+    };
+    AgentResolver::resolve(pane, &sources)
+}
+
+/// Typed facade over the raw `pane_agents` DB table: records the agent kind for
+/// panes grove launched, reads them back as `AgentKind`, and garbage-collects
+/// rows whose panes are gone. The raw `Db` methods are sealed (`pub(crate)`) so
+/// all access flows through here.
+pub struct PaneAgentStore<'a> {
+    db: &'a Db,
+}
+
+impl<'a> PaneAgentStore<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self { db }
     }
-    // 2. Grove-recorded kind (authoritative for panes grove launched)
-    if let Some(kind) = recorded_kinds.get(&pane.pane_id) {
-        return Some(AgentInfo {
-            kind: *kind,
-            state: AgentState::Active,
-        });
+
+    /// Record (or update) the agent kind for a pane.
+    pub fn record(&self, pane_id: &str, kind: AgentKind) -> Result<(), GroveError> {
+        self.db.record_pane_agent(pane_id, &kind.to_string())
     }
-    // 3. tmux command-name substring match
-    if let Some(def) = identify_agent(pane) {
-        return Some(AgentInfo {
-            kind: def.kind,
-            state: AgentState::Active,
-        });
+
+    /// All recorded pane_id → AgentKind, dropping rows whose kind no longer parses.
+    pub fn kinds(&self) -> HashMap<String, AgentKind> {
+        let Ok(raw) = self.db.list_pane_agents() else {
+            return HashMap::new();
+        };
+        raw.into_iter()
+            .filter_map(|(pane_id, kind)| AgentKind::parse(&kind).map(|k| (pane_id, k)))
+            .collect()
     }
-    // 4. Process-tree fallback
-    if let Some(kind) = detect_via_process_tree(pane) {
-        return Some(AgentInfo {
-            kind,
-            state: AgentState::Active,
-        });
+
+    /// Drop recorded rows for panes that are no longer live.
+    pub fn gc(&self, live_pane_ids: &std::collections::HashSet<String>) -> Result<(), GroveError> {
+        for pane_id in self.kinds().keys() {
+            if !live_pane_ids.contains(pane_id) {
+                self.db.delete_pane_agent(pane_id)?;
+            }
+        }
+        Ok(())
     }
-    None
+
+    /// Remove a single pane's recorded row.
+    pub fn remove(&self, pane_id: &str) -> Result<(), GroveError> {
+        self.db.delete_pane_agent(pane_id)
+    }
 }
 
 #[cfg(test)]
@@ -570,6 +595,8 @@ mod tests {
     fn test_agent_state_display() {
         assert_eq!(AgentState::Active.to_string(), "active");
         assert_eq!(AgentState::Waiting.to_string(), "waiting");
+        assert_eq!(AgentState::Idle.to_string(), "idle");
+        assert_eq!(AgentState::Unknown.to_string(), "unknown");
         assert_eq!(AgentState::NotRunning.to_string(), "not running");
     }
 
@@ -603,5 +630,69 @@ mod tests {
     fn test_identify_agent_unknown() {
         let pane = make_pane("%4", "vim");
         assert!(identify_agent(&pane).is_none());
+    }
+
+    #[test]
+    fn ag_resolve_kind_known_state_unknown_not_active() {
+        // A pane grove launched (DB kind known) but whose hook never fired must
+        // resolve to Unknown — never a stuck Active.
+        let mut db_kind_map = HashMap::new();
+        db_kind_map.insert("%7".to_string(), AgentKind::Codex);
+        let sources = AgentSources {
+            state_map: HashMap::new(),
+            state_kind_map: HashMap::new(),
+            db_kind_map,
+        };
+
+        let info = AgentResolver::resolve(&make_pane("%7", "zsh"), &sources).unwrap();
+        assert_eq!(info.kind, AgentKind::Codex);
+        assert_eq!(info.state, AgentState::Unknown);
+        assert_ne!(info.state, AgentState::Active);
+    }
+
+    #[test]
+    fn ag_kind_serde_wire_strings() {
+        let cases = [
+            (AgentKind::Claude, "\"claude\""),
+            (AgentKind::OpenCode, "\"opencode\""),
+            (AgentKind::Codex, "\"codex\""),
+            (AgentKind::Cursor, "\"cursor\""),
+        ];
+        for (kind, wire) in cases {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            let back: AgentKind = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    fn open_temp_db() -> crate::db::Db {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        std::mem::forget(f);
+        crate::db::Db::open_path(&path).unwrap()
+    }
+
+    #[test]
+    fn pas_gc_removes_dead_pane() {
+        let db = open_temp_db();
+        let store = PaneAgentStore::new(&db);
+        store.record("%1", AgentKind::Claude).unwrap();
+        store.record("%2", AgentKind::Codex).unwrap();
+
+        let live: std::collections::HashSet<String> = ["%1".to_string()].into_iter().collect();
+        store.gc(&live).unwrap();
+
+        let kinds = store.kinds();
+        assert_eq!(kinds.get("%1"), Some(&AgentKind::Claude));
+        assert_eq!(kinds.get("%2"), None);
+    }
+
+    #[test]
+    fn pas_remove_clears_row() {
+        let db = open_temp_db();
+        let store = PaneAgentStore::new(&db);
+        store.record("%1", AgentKind::Claude).unwrap();
+        store.remove("%1").unwrap();
+        assert!(store.kinds().is_empty());
     }
 }

@@ -26,6 +26,21 @@ pub(crate) enum Focus {
     Notepad,
 }
 
+/// Current input-capture overlay. Mutually exclusive by construction.
+pub(crate) enum Overlay {
+    None,
+    Search { query: String, target: SidebarFocus },
+    Prompt(String),
+    OpenChoice { dir: String },
+}
+
+/// A one-shot deferred shell side-effect to run after the next draw.
+pub(crate) enum PendingShell {
+    None,
+    Popup(String),
+    FzfPicker,
+}
+
 /// Main application state for the TUI.
 pub(crate) struct App {
     pub tree: TreeState,
@@ -33,21 +48,17 @@ pub(crate) struct App {
     pub last_interaction: Instant,
     pub should_quit: bool,
     pub verbose: bool,
-    pub search_input: Option<String>,
-    pub prompt_input: Option<String>,
+    pub overlay: Overlay,
     pub status_message: Option<String>,
-    #[allow(dead_code)]
     pub my_pane_id: String,
-    pub pending_popup: Option<String>,
-    pub pending_fzf: bool,
-    /// Directory picked by fzf, awaiting open-prompt sub-choice.
-    pub open_prompt_dir: Option<String>,
+    pub pending_shell: PendingShell,
     pub preview_scroll_up: u16,
     pub diff_mode: bool,
     pub diff_state: Option<DiffState>,
     pub default_agent_command: String,
     pub sidebar_focus: SidebarFocus,
     pub focus: Focus,
+    pub config: GroveConfig,
     pub db: Db,
     pub projects: Vec<Project>,
     pub projects_cursor: usize,
@@ -64,8 +75,13 @@ pub(crate) struct NoteState {
 }
 
 impl App {
-    /// Create a new App, querying the TUI's own pane ID.
-    pub fn new(verbose: bool, popup: bool) -> Result<Self, GroveError> {
+    /// Create a new App from the owned config + db, querying the TUI's own pane ID.
+    pub fn new(
+        config: GroveConfig,
+        db: Db,
+        verbose: bool,
+        popup: bool,
+    ) -> Result<Self, GroveError> {
         let my_pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
         let my_pane_id = if my_pane_id.is_empty() {
             tmux::get_pane_id("", verbose).unwrap_or_default()
@@ -73,14 +89,27 @@ impl App {
             my_pane_id
         };
 
-        let default_agent_command = GroveConfig::load(None, None, None, None)
-            .map(|(c, _)| c.claude_command)
-            .unwrap_or_else(|_| "claude".to_string());
+        let mut app = Self::with_parts(config, db, my_pane_id, verbose, popup);
+        app.projects = app.db.list_projects().unwrap_or_default();
+        app.refresh_tree();
+        app.tree.jump_first_pane();
+        app.refresh_preview();
+        app.sync_note_to_group();
+        Ok(app)
+    }
 
-        let db = Db::open()?;
-        let projects = db.list_projects().unwrap_or_default();
-
-        let mut app = App {
+    /// Construct an App from explicit parts without touching tmux or the
+    /// network. The headless seam used by tests (and by `new`, which then
+    /// performs the live refresh).
+    pub(crate) fn with_parts(
+        config: GroveConfig,
+        db: Db,
+        my_pane_id: String,
+        verbose: bool,
+        popup: bool,
+    ) -> Self {
+        let default_agent_command = config.claude_command.clone();
+        App {
             tree: TreeState {
                 groups: Vec::new(),
                 cursor: 0,
@@ -88,24 +117,22 @@ impl App {
                 search_filter: None,
                 agent_filter: AgentFilter::AnyAgent,
             },
-            search_input: None,
+            overlay: Overlay::None,
             preview_content: String::new(),
             last_interaction: Instant::now(),
             should_quit: false,
             verbose,
-            prompt_input: None,
             status_message: None,
             my_pane_id,
-            pending_popup: None,
-            pending_fzf: false,
-            open_prompt_dir: None,
+            pending_shell: PendingShell::None,
             preview_scroll_up: 0,
             diff_mode: false,
             diff_state: None,
             default_agent_command,
             sidebar_focus: SidebarFocus::Tree,
+            config,
             db,
-            projects,
+            projects: Vec::new(),
             projects_cursor: 0,
             projects_search_filter: None,
             popup,
@@ -115,13 +142,14 @@ impl App {
                 editor: EditorState::default(),
                 project: String::new(),
             },
-        };
+        }
+    }
 
-        app.refresh_tree();
-        app.tree.jump_first_pane();
-        app.refresh_preview();
-        app.sync_note_to_group();
-        Ok(app)
+    /// Whether an input-capture overlay is active. Background refresh
+    /// (`on_tick`/SIGUSR1) is gated on this so a tmux hook firing mid-overlay
+    /// can't rebuild the tree and yank the cursor out from under the user.
+    pub(crate) fn overlay_active(&self) -> bool {
+        !matches!(self.overlay, Overlay::None)
     }
 
     /// Refresh tree data from tmux and claude state.
@@ -131,22 +159,38 @@ impl App {
             source::fetch_agent_states(),
         ) {
             (Ok(panes), Ok(states)) => {
+                // Drop recorded pane_agents rows whose panes are gone, before
+                // reading them back, so dead rows can't resurrect a stale agent.
+                let live: std::collections::HashSet<String> =
+                    panes.iter().map(|p| p.pane_id.clone()).collect();
+                if let Err(e) = crate::agent::PaneAgentStore::new(&self.db).gc(&live) {
+                    if self.verbose {
+                        eprintln!("Warning: pane_agents GC failed: {e}");
+                    }
+                }
                 // DB-recorded kinds are authoritative (set at launch); fall back
                 // to kinds the agents declared in the shared state file.
                 let mut recorded = source::fetch_recorded_agents(&self.db);
                 for (id, kind) in source::fetch_state_kinds() {
                     recorded.entry(id).or_insert(kind);
                 }
-                let marked = self.db.list_pane_overrides();
+                let marked = self.db.list_pane_overrides().unwrap_or_else(|e| {
+                    if self.verbose {
+                        eprintln!("Warning: list_pane_overrides failed: {e}");
+                    }
+                    std::collections::HashSet::new()
+                });
                 let current_session = crate::tmux::current_session(self.verbose).ok();
                 let old_group_count = self.tree.groups.len();
+                // Exclude the TUI's own pane so it never lists itself (D7).
+                let my_pane_id = self.my_pane_id.clone();
                 self.tree.rebuild(
                     &panes,
                     &states,
                     &recorded,
                     &marked,
                     current_session.as_deref(),
-                    "",
+                    &my_pane_id,
                 );
                 self.status_message = None;
                 // Only upsert projects when groups change (avoids writes every 5s tick)
@@ -283,5 +327,61 @@ impl App {
         if let Err(e) = self.db.save_note(&self.notepad.project, &content) {
             self.status_message = Some(format!("Failed to save note: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> Db {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        std::mem::forget(f);
+        Db::open_path(&path).unwrap()
+    }
+
+    /// TUI-config-flag-honored (P0 / A2): the App carries the config it was
+    /// constructed with (which `main` resolved from `--config`), not a reloaded
+    /// default. Pre-refactor `App::new` called `GroveConfig::load(None,..)`,
+    /// silently discarding `--config`.
+    #[test]
+    fn config_flag_honored() {
+        let config = GroveConfig {
+            claude_command: "claude --distinctive-flag".to_string(),
+            ..Default::default()
+        };
+        let app = App::with_parts(config, temp_db(), String::new(), false, false);
+        assert_eq!(app.config.claude_command, "claude --distinctive-flag");
+        assert_eq!(app.default_agent_command, "claude --distinctive-flag");
+    }
+
+    /// TUI-refresh-gated-under-modal (P1 / sigusr1-tick-modal): the event loop
+    /// gates `on_tick`/SIGUSR1 `refresh_tree` on `!overlay_active()`, so a tmux
+    /// hook firing mid-search can't rebuild the tree and reset the cursor under
+    /// the user's typing. Pin the predicate the gate relies on.
+    #[test]
+    fn refresh_gated_under_modal() {
+        let mut app = App::with_parts(
+            GroveConfig::default(),
+            temp_db(),
+            String::new(),
+            false,
+            false,
+        );
+
+        // No overlay: background refresh is allowed.
+        assert!(!app.overlay_active());
+
+        // Entering search captures input → background refresh is suppressed.
+        app.overlay = Overlay::Search {
+            query: "x".to_string(),
+            target: SidebarFocus::Tree,
+        };
+        assert!(app.overlay_active());
+
+        // Closing the overlay re-enables background refresh.
+        app.overlay = Overlay::None;
+        assert!(!app.overlay_active());
     }
 }

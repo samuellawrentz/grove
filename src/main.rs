@@ -40,16 +40,17 @@ fn run(cli: Cli) -> Result<(), GroveError> {
 
     let db = db::Db::open()?;
 
+    let ctx = commands::Ctx {
+        config: &config,
+        db: &db,
+        json_mode,
+        verbose,
+    };
+
     match cli.command {
-        Commands::Register { name, url } => {
-            commands::register::run(&name, &url, &config, &db, json_mode, verbose)?;
-        }
-        Commands::Repos => {
-            commands::repos::run(&db, json_mode)?;
-        }
-        Commands::Sync { repo } => {
-            commands::sync::run(repo.as_deref(), &config, &db, json_mode, verbose)?;
-        }
+        Commands::Register { name, url } => commands::register::run(&name, &url, &ctx)?,
+        Commands::Repos => commands::repos::run(&ctx)?,
+        Commands::Sync { repo } => commands::sync::run(repo.as_deref(), &ctx)?,
         Commands::Init {
             task_id,
             repos,
@@ -63,22 +64,6 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             agent,
             no_attach,
         } => {
-            let task_id = match task_id {
-                Some(id) => id,
-                None => {
-                    if !interactive {
-                        return Err(GroveError::General(
-                            "task_id is required (use -i for interactive mode)".to_string(),
-                        ));
-                    }
-                    dialoguer::Input::new()
-                        .with_prompt("Task ID")
-                        .interact_text()
-                        .map_err(|e| {
-                            GroveError::General(format!("interactive input failed: {e}"))
-                        })?
-                }
-            };
             let opts = commands::init::InitOptions {
                 repos: &repos,
                 context: context.as_deref(),
@@ -86,41 +71,29 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                 base: base.as_deref(),
                 interactive,
                 no_tmux,
-                no_claude: no_claude || no_agent,
+                no_claude,
+                no_agent,
                 no_attach,
                 agent: agent.as_deref(),
             };
-            commands::init::run(&task_id, &opts, &config, &db, json_mode, verbose)?;
+            commands::init::run(task_id.as_deref(), &opts, &ctx)?;
         }
         Commands::Close {
             task_id,
             force,
             delete_branches,
             interactive,
-        } => {
-            commands::close::run(
-                task_id.as_deref(),
-                force,
-                delete_branches,
-                interactive,
-                &config,
-                &db,
-                json_mode,
-                verbose,
-            )?;
-        }
-        Commands::List => {
-            commands::list::run(&db, &config, json_mode, verbose)?;
-        }
-        Commands::Attach { task_id } => {
-            commands::attach::run(&task_id, &db, json_mode, verbose)?;
-        }
-        Commands::Status { task_id } => {
-            commands::status::run(task_id.as_deref(), &db, json_mode, verbose)?;
-        }
-        Commands::Send { task_id, prompt } => {
-            commands::send::run(&task_id, &prompt, &db, json_mode, verbose)?;
-        }
+        } => commands::close::run(
+            task_id.as_deref(),
+            force,
+            delete_branches,
+            interactive,
+            &ctx,
+        )?,
+        Commands::List => commands::list::run(&ctx)?,
+        Commands::Attach { task_id } => commands::attach::run(&task_id, &ctx)?,
+        Commands::Status { task_id } => commands::status::run(task_id.as_deref(), &ctx)?,
+        Commands::Send { task_id, prompt } => commands::send::run(&task_id, &prompt, &ctx)?,
         Commands::Tui { popup } => {
             if !tmux::is_tmux_available() {
                 return Err(GroveError::TmuxNotRunning("tmux is not installed".into()));
@@ -130,10 +103,13 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                     "grove tui must be run inside tmux".into(),
                 ));
             }
-            tui::run(verbose, popup)?;
+            // `ctx` is unused in this arm; NLL ends its borrow of config + db
+            // here, so they can be moved into the TUI which owns them — no
+            // second Db::open / config reload.
+            tui::run(config, db, verbose, popup)?;
         }
         Commands::ProjectTouch { path } => {
-            db.upsert_project(&path)?;
+            ctx.db.upsert_project(&path)?;
         }
         Commands::Compose { target } => {
             if !tmux::is_inside_tmux() {
@@ -148,18 +124,7 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             repo,
             branch,
             base,
-        } => {
-            commands::add::run(
-                &task_id,
-                &repo,
-                branch.as_deref(),
-                base.as_deref(),
-                &config,
-                &db,
-                json_mode,
-                verbose,
-            )?;
-        }
+        } => commands::add::run(&task_id, &repo, branch.as_deref(), base.as_deref(), &ctx)?,
     }
 
     Ok(())

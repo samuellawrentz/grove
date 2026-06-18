@@ -5,7 +5,17 @@ use edtui::{EditorEventHandler, EditorMode};
 use crate::agent::{AgentFilter, AgentState, AGENT_REGISTRY};
 use crate::tmux;
 
-use super::app::{App, Focus, SidebarFocus};
+use super::app::{App, Focus, Overlay, PendingShell, SidebarFocus};
+use super::flat_rows::FlatRows;
+
+/// Resolve the launch command for an agent `launch_key` (e.g. 'c','o','x','u')
+/// via the registry + config overrides. Returns `None` for unknown keys.
+fn launch_for_key(app: &App, key: char) -> Option<String> {
+    AGENT_REGISTRY
+        .iter()
+        .find(|d| d.launch_key == key)
+        .map(|d| app.config.resolved_agent_command(d.wire_name))
+}
 
 /// Handle a key event in the TUI.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
@@ -65,160 +75,21 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Search input mode
-    if let Some(ref mut query) = app.search_input {
-        match app.sidebar_focus {
-            SidebarFocus::Tree => match key.code {
-                KeyCode::Enter => {
-                    if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                        let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-                        app.should_quit = app.popup;
-                    }
-                    app.search_input = None;
-                    app.tree.search_filter = None;
-                }
-                KeyCode::Esc => {
-                    app.search_input = None;
-                    app.tree.search_filter = None;
-                }
-                KeyCode::Down => {
-                    app.tree.move_cursor_to_pane(true);
-                    update_scroll(app);
-                    app.refresh_preview();
-                }
-                KeyCode::Up => {
-                    app.tree.move_cursor_to_pane(false);
-                    update_scroll(app);
-                    app.refresh_preview();
-                }
-                KeyCode::Char(c) => {
-                    query.push(c);
-                    app.tree.search_filter = Some(query.clone());
-                    app.tree.jump_first_pane();
-                    update_scroll(app);
-                    app.refresh_preview();
-                }
-                KeyCode::Backspace => {
-                    query.pop();
-                    app.tree.search_filter = if query.is_empty() {
-                        None
-                    } else {
-                        Some(query.clone())
-                    };
-                    app.tree.jump_first_pane();
-                    update_scroll(app);
-                    app.refresh_preview();
-                }
-                _ => {}
-            },
-            SidebarFocus::Projects => match key.code {
-                KeyCode::Enter => {
-                    let indices = app.filtered_project_indices();
-                    if !indices.is_empty() {
-                        let real_idx = indices[app.projects_cursor.min(indices.len() - 1)];
-                        let dir = app.projects[real_idx].path.to_string_lossy().to_string();
-                        let cmd = format!("{} -c", app.default_agent_command);
-                        app.search_input = None;
-                        app.projects_search_filter = None;
-                        launch_in_new_window(app, &dir, Some(&cmd));
-                    }
-                    app.search_input = None;
-                    app.projects_search_filter = None;
-                }
-                KeyCode::Esc => {
-                    app.search_input = None;
-                    app.projects_search_filter = None;
-                }
-                KeyCode::Down => {
-                    let max = app.filtered_project_indices().len();
-                    if app.projects_cursor + 1 < max {
-                        app.projects_cursor += 1;
-                    }
-                }
-                KeyCode::Up => {
-                    app.projects_cursor = app.projects_cursor.saturating_sub(1);
-                }
-                KeyCode::Char(c) => {
-                    query.push(c);
-                    app.projects_search_filter = Some(query.clone());
-                    app.projects_cursor = 0;
-                }
-                KeyCode::Backspace => {
-                    query.pop();
-                    app.projects_search_filter = if query.is_empty() {
-                        None
-                    } else {
-                        Some(query.clone())
-                    };
-                    app.projects_cursor = 0;
-                }
-                _ => {}
-            },
+    // Input-capture overlays: each is matched in exactly one place.
+    match std::mem::replace(&mut app.overlay, Overlay::None) {
+        Overlay::Search { mut query, target } => {
+            handle_search_key(app, key, &mut query, target);
+            return;
         }
-        return;
-    }
-
-    // Prompt input mode
-    if let Some(ref mut input) = app.prompt_input {
-        match key.code {
-            KeyCode::Enter => {
-                let text = input.clone();
-                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                    if !text.is_empty() {
-                        let _ = tmux::send_keys(&pane_id, &text, app.verbose);
-                        app.refresh_tree();
-                    }
-                }
-                app.prompt_input = None;
-            }
-            KeyCode::Esc => {
-                app.prompt_input = None;
-            }
-            KeyCode::Char(c) => {
-                input.push(c);
-            }
-            KeyCode::Backspace => {
-                input.pop();
-            }
-            _ => {}
+        Overlay::Prompt(mut input) => {
+            handle_prompt_key(app, key, &mut input);
+            return;
         }
-        return;
-    }
-
-    // Open prompt mode: user picked a directory, now choosing what to launch
-    if let Some(dir) = app.open_prompt_dir.take() {
-        match key.code {
-            KeyCode::Char('c') => {
-                let cmd = app.default_agent_command.clone();
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-            KeyCode::Char('o') => {
-                let cmd = agent_command_for("opencode");
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-            KeyCode::Char('x') => {
-                let cmd = agent_command_for("codex");
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-            KeyCode::Char('u') => {
-                let cmd = agent_command_for("cursor");
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-            KeyCode::Char('t') => {
-                launch_in_new_window(app, &dir, None);
-            }
-            KeyCode::Char('e') => {
-                launch_in_new_window(app, &dir, Some("nvim ."));
-            }
-            KeyCode::Esc => {
-                // cancelled
-            }
-            _ => {
-                // unrecognized key, put dir back
-                app.open_prompt_dir = Some(dir);
-            }
+        Overlay::OpenChoice { dir } => {
+            handle_open_choice_key(app, key, dir);
+            return;
         }
-        return;
+        Overlay::None => {}
     }
 
     // Global keys (work in both panes)
@@ -311,11 +182,14 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('/') => {
-            app.search_input = Some(String::new());
+            app.overlay = Overlay::Search {
+                query: String::new(),
+                target: app.sidebar_focus,
+            };
             return;
         }
         KeyCode::Char('o') => {
-            app.pending_fzf = true;
+            app.pending_shell = PendingShell::FzfPicker;
             return;
         }
         _ => {}
@@ -325,6 +199,169 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     match app.sidebar_focus {
         SidebarFocus::Tree => handle_tree_key(app, key),
         SidebarFocus::Projects => handle_projects_key(app, key),
+    }
+}
+
+/// Handle a key while the Search overlay is active. On exit the overlay stays
+/// `None`; otherwise it is re-armed with the (possibly mutated) query.
+fn handle_search_key(app: &mut App, key: KeyEvent, query: &mut String, target: SidebarFocus) {
+    use crossterm::event::KeyCode;
+
+    match target {
+        SidebarFocus::Tree => match key.code {
+            KeyCode::Enter => {
+                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
+                    let _ = tmux::switch_to_pane(&pane_id, app.verbose);
+                    app.should_quit = app.popup;
+                }
+                app.tree.search_filter = None;
+            }
+            KeyCode::Esc => {
+                app.tree.search_filter = None;
+            }
+            KeyCode::Down => {
+                app.tree.move_cursor_to_pane(true);
+                update_scroll(app);
+                app.refresh_preview();
+                rearm_search(app, query, target);
+            }
+            KeyCode::Up => {
+                app.tree.move_cursor_to_pane(false);
+                update_scroll(app);
+                app.refresh_preview();
+                rearm_search(app, query, target);
+            }
+            KeyCode::Char(c) => {
+                query.push(c);
+                app.tree.search_filter = Some(query.clone());
+                app.tree.jump_first_pane();
+                update_scroll(app);
+                app.refresh_preview();
+                rearm_search(app, query, target);
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                app.tree.search_filter = if query.is_empty() {
+                    None
+                } else {
+                    Some(query.clone())
+                };
+                app.tree.jump_first_pane();
+                update_scroll(app);
+                app.refresh_preview();
+                rearm_search(app, query, target);
+            }
+            _ => rearm_search(app, query, target),
+        },
+        SidebarFocus::Projects => match key.code {
+            KeyCode::Enter => {
+                let indices = app.filtered_project_indices();
+                if !indices.is_empty() {
+                    let real_idx = indices[app.projects_cursor.min(indices.len() - 1)];
+                    let dir = app.projects[real_idx].path.to_string_lossy().to_string();
+                    let cmd = format!("{} -c", app.default_agent_command);
+                    app.projects_search_filter = None;
+                    launch_in_new_window(app, &dir, Some(&cmd));
+                }
+                app.projects_search_filter = None;
+            }
+            KeyCode::Esc => {
+                app.projects_search_filter = None;
+            }
+            KeyCode::Down => {
+                let max = app.filtered_project_indices().len();
+                if app.projects_cursor + 1 < max {
+                    app.projects_cursor += 1;
+                }
+                rearm_search(app, query, target);
+            }
+            KeyCode::Up => {
+                app.projects_cursor = app.projects_cursor.saturating_sub(1);
+                rearm_search(app, query, target);
+            }
+            KeyCode::Char(c) => {
+                query.push(c);
+                app.projects_search_filter = Some(query.clone());
+                app.projects_cursor = 0;
+                rearm_search(app, query, target);
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                app.projects_search_filter = if query.is_empty() {
+                    None
+                } else {
+                    Some(query.clone())
+                };
+                app.projects_cursor = 0;
+                rearm_search(app, query, target);
+            }
+            _ => rearm_search(app, query, target),
+        },
+    }
+}
+
+/// Re-arm the Search overlay with the current query/target (it was taken out
+/// by the `mem::replace` in `handle_key`).
+fn rearm_search(app: &mut App, query: &str, target: SidebarFocus) {
+    app.overlay = Overlay::Search {
+        query: query.to_string(),
+        target,
+    };
+}
+
+/// Handle a key while the Prompt overlay is active.
+fn handle_prompt_key(app: &mut App, key: KeyEvent, input: &mut String) {
+    use crossterm::event::KeyCode;
+
+    match key.code {
+        KeyCode::Enter => {
+            let text = input.clone();
+            if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
+                if !text.is_empty() {
+                    let _ = tmux::send_keys(&pane_id, &text, app.verbose);
+                    app.refresh_tree();
+                }
+            }
+        }
+        KeyCode::Esc => {}
+        KeyCode::Char(c) => {
+            input.push(c);
+            app.overlay = Overlay::Prompt(input.clone());
+        }
+        KeyCode::Backspace => {
+            input.pop();
+            app.overlay = Overlay::Prompt(input.clone());
+        }
+        _ => {
+            app.overlay = Overlay::Prompt(input.clone());
+        }
+    }
+}
+
+/// Handle a key in the open-prompt sub-choice (a directory was picked by fzf,
+/// now choosing what to launch in it).
+fn handle_open_choice_key(app: &mut App, key: KeyEvent, dir: String) {
+    use crossterm::event::KeyCode;
+
+    match key.code {
+        KeyCode::Char(c @ ('c' | 'o' | 'x' | 'u')) => {
+            if let Some(cmd) = launch_for_key(app, c) {
+                launch_in_new_window(app, &dir, Some(&cmd));
+            }
+        }
+        KeyCode::Char('t') => {
+            launch_in_new_window(app, &dir, None);
+        }
+        KeyCode::Char('e') => {
+            launch_in_new_window(app, &dir, Some("nvim ."));
+        }
+        KeyCode::Esc => {
+            // cancelled
+        }
+        _ => {
+            // unrecognized key: keep the overlay open awaiting a valid choice
+            app.overlay = Overlay::OpenChoice { dir };
+        }
     }
 }
 
@@ -397,10 +434,8 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char('s') => {
-            if app.tree.selected_pane().is_some() {
-                app.prompt_input = Some(String::new());
-            }
+        KeyCode::Char('s') if app.tree.selected_pane().is_some() => {
+            app.overlay = Overlay::Prompt(String::new());
         }
         KeyCode::Char('x') => {
             if let Some(pane) = app.tree.selected_pane() {
@@ -411,35 +446,19 @@ fn handle_tree_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('n') => {
-            app.pending_popup = Some("grove init -i".to_string());
+            app.pending_shell = PendingShell::Popup("grove init -i".to_string());
         }
         KeyCode::Char('e') => {
             if let Some((target, cwd)) = selected_target_cwd(app) {
                 launch_split(app, &target, &cwd, Some("nvim ."));
             }
         }
-        KeyCode::Char('C') => {
-            let cmd = app.default_agent_command.clone();
-            if let Some((target, cwd)) = selected_target_cwd(app) {
-                launch_split(app, &target, &cwd, Some(&cmd));
-            }
-        }
-        KeyCode::Char('O') => {
-            let cmd = agent_command_for("opencode");
-            if let Some((target, cwd)) = selected_target_cwd(app) {
-                launch_split(app, &target, &cwd, Some(&cmd));
-            }
-        }
-        KeyCode::Char('X') => {
-            let cmd = agent_command_for("codex");
-            if let Some((target, cwd)) = selected_target_cwd(app) {
-                launch_split(app, &target, &cwd, Some(&cmd));
-            }
-        }
-        KeyCode::Char('U') => {
-            let cmd = agent_command_for("cursor");
-            if let Some((target, cwd)) = selected_target_cwd(app) {
-                launch_split(app, &target, &cwd, Some(&cmd));
+        // Split-launch an agent: C/O/X/U map to the registry launch_key (lowercased).
+        KeyCode::Char(c @ ('C' | 'O' | 'X' | 'U')) => {
+            if let Some(cmd) = launch_for_key(app, c.to_ascii_lowercase()) {
+                if let Some((target, cwd)) = selected_target_cwd(app) {
+                    launch_split(app, &target, &cwd, Some(&cmd));
+                }
             }
         }
         KeyCode::Char('T') => {
@@ -495,10 +514,8 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) {
     };
 
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            if app.projects_cursor + 1 < indices.len() {
-                app.projects_cursor += 1;
-            }
+        KeyCode::Char('j') | KeyCode::Down if app.projects_cursor + 1 < indices.len() => {
+            app.projects_cursor += 1;
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.projects_cursor = app.projects_cursor.saturating_sub(1);
@@ -594,15 +611,6 @@ fn launch_in_new_window(app: &mut App, dir: &str, cmd: Option<&str>) {
             app.status_message = Some(format!("new window failed: {e}"));
         }
     }
-}
-
-/// Look up the default command for an agent by name from the registry.
-fn agent_command_for(name: &str) -> String {
-    AGENT_REGISTRY
-        .iter()
-        .find(|d| d.display_name.eq_ignore_ascii_case(name))
-        .map(|d| d.default_command.to_string())
-        .unwrap_or_else(|| name.to_string())
 }
 
 /// Keep scroll_offset in sync with cursor position.

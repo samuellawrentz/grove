@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use super::flat_rows::FlatRows;
 use crate::agent::{detect_agent_in_pane, AgentFilter, AgentInfo, AgentKind, AgentState};
 use crate::tmux::PaneInfo;
 
@@ -175,20 +176,17 @@ impl TreeState {
         self.selected_pane().map(|p| p.pane_info.pane_id.as_str())
     }
 
-    /// Move cursor by delta, skipping collapsed children.
+    /// Move cursor by delta, skipping collapsed children. Cursor/overrun math is
+    /// the shared `FlatRows` trait (one copy across tree + diff).
     #[cfg(test)]
     pub fn move_cursor(&mut self, delta: i32) {
-        let count = self.visible_count();
-        if count == 0 {
+        if self.visible_count() == 0 {
             return;
         }
-        let new = self.cursor as i32 + delta;
-        if new < 0 {
-            self.cursor = 0;
-        } else if new >= count as i32 {
-            self.cursor = count - 1;
+        if delta >= 0 {
+            FlatRows::move_down_by(self, delta as usize);
         } else {
-            self.cursor = new as usize;
+            FlatRows::move_up_by(self, delta.unsigned_abs() as usize);
         }
     }
 
@@ -368,6 +366,20 @@ impl TreeState {
     pub fn cursor_group(&self) -> Option<&TreeGroup> {
         self.cursor_group_index().map(|i| &self.groups[i])
     }
+}
+
+impl FlatRows for TreeState {
+    fn total(&self) -> usize {
+        self.visible_count()
+    }
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+    fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor;
+    }
+    // No per-step side effect: tree expand/collapse is driven by explicit keys,
+    // not by cursor movement (unlike diff auto-expand).
 }
 
 fn fuzzy_match(query: &str, target: &str) -> bool {
@@ -689,7 +701,9 @@ mod tests {
 
         let agent = tree.groups[0].panes[0].agent.as_ref().unwrap();
         assert_eq!(agent.kind, AgentKind::Claude);
-        assert_eq!(agent.state, AgentState::Active);
+        // Kind is known from the command, but there is no live state signal, so
+        // it must be Unknown — never a stuck Active.
+        assert_eq!(agent.state, AgentState::Unknown);
     }
 
     #[test]
@@ -973,5 +987,77 @@ mod tests {
 
         assert_eq!(groups[0].panes[0].pane_info.pane_id, "%2");
         assert_eq!(groups[0].panes[1].pane_info.pane_id, "%1");
+    }
+
+    // ── Step 10: shared FlatRows equivalence pins ───────────────────────────
+
+    /// Independent reference walk: the flat list of (is_header, pane_id) rows in
+    /// the same order the real walks visit them. The oracle for the equivalence
+    /// properties below.
+    fn reference_rows(tree: &TreeState) -> Vec<Option<String>> {
+        let mut rows = Vec::new();
+        for group in &tree.groups {
+            rows.push(None); // group header
+            if group.expanded {
+                for pane in &group.panes {
+                    rows.push(Some(pane.pane_info.pane_id.clone()));
+                }
+            }
+        }
+        rows
+    }
+
+    fn three_group_tree() -> TreeState {
+        let panes = vec![
+            make_pane("%1", "main", 0, "/opt/a", "zsh"),
+            make_pane("%2", "main", 1, "/opt/a", "zsh"),
+            make_pane("%3", "work", 0, "/opt/b", "zsh"),
+            make_pane("%4", "work", 1, "/opt/b", "zsh"),
+            make_pane("%5", "dev", 0, "/opt/c", "zsh"),
+        ];
+        let states = HashMap::new();
+        TreeState::build(&panes, &states, "")
+    }
+
+    /// TREE-visiblecount-eq-rows-property (P1 / Step 10): visible_count() must
+    /// equal the reference row walk across every expand/collapse combination.
+    #[test]
+    fn tree_visiblecount_eq_rows_property() {
+        let mut tree = three_group_tree();
+        let n = tree.groups.len();
+        // Drive every combination of group expand/collapse.
+        for mask in 0..(1u32 << n) {
+            for (i, group) in tree.groups.iter_mut().enumerate() {
+                group.expanded = (mask >> i) & 1 == 1;
+            }
+            assert_eq!(
+                tree.visible_count(),
+                reference_rows(&tree).len(),
+                "visible_count disagrees with reference walk for mask {mask}"
+            );
+        }
+    }
+
+    /// TREE-selected-pane-agrees-every-cursor (P1 / Step 10): selected_pane_id()
+    /// must match the reference walk (header → None, pane → its id) for every
+    /// cursor and every expand configuration.
+    #[test]
+    fn tree_selected_pane_agrees_every_cursor() {
+        let mut tree = three_group_tree();
+        let n = tree.groups.len();
+        for mask in 0..(1u32 << n) {
+            for (i, group) in tree.groups.iter_mut().enumerate() {
+                group.expanded = (mask >> i) & 1 == 1;
+            }
+            let oracle = reference_rows(&tree);
+            for (c, expected) in oracle.iter().enumerate() {
+                tree.cursor = c;
+                let got = tree.selected_pane_id().map(|s| s.to_string());
+                assert_eq!(
+                    &got, expected,
+                    "selected_pane_id mismatch at cursor {c}, mask {mask}"
+                );
+            }
+        }
     }
 }

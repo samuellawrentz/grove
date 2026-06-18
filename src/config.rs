@@ -210,6 +210,10 @@ impl GroveConfig {
             config.tasks_dir = p.to_path_buf();
         }
 
+        // Clamp parallelism: 0 would deadlock the (now removed) semaphore and is
+        // meaningless for chunked fan-out. One owner for the floor.
+        config.max_parallel_syncs = config.max_parallel_syncs.max(1);
+
         Ok((config, json_mode))
     }
 }
@@ -249,5 +253,46 @@ mod tests {
         // Directly test that create_dir_all works (auto-create logic)
         std::fs::create_dir_all(&grove).unwrap();
         assert!(grove.exists());
+    }
+
+    /// CONFIG-max-parallel-zero-clamped (P1 / N2): a configured 0 must be raised
+    /// to at least 1 at load, so it can never reach the fan-out as a deadlocking
+    /// "no permits" value.
+    #[test]
+    fn max_parallel_zero_clamped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.json");
+        std::fs::write(&cfg_path, r#"{"max_parallel_syncs": 0}"#).unwrap();
+
+        let (config, _json) = GroveConfig::load(Some(&cfg_path), None, None, Some(false)).unwrap();
+        assert!(
+            config.max_parallel_syncs >= 1,
+            "max_parallel_syncs must be clamped to >= 1, got {}",
+            config.max_parallel_syncs
+        );
+    }
+
+    /// TUI-resolve-agent-override (P1 / Step 8): a per-agent override in
+    /// `agent_commands` wins over the registry default. This is the value the
+    /// registry-driven TUI launch dispatch (`launch_for_key`) resolves through,
+    /// so a user's override is honored by the `O`/`X`/`U` keys.
+    #[test]
+    fn resolve_agent_override() {
+        let mut agent_commands = HashMap::new();
+        agent_commands.insert("opencode".to_string(), "opencode --my-flag".to_string());
+        let config = GroveConfig {
+            agent_commands,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.resolved_agent_command("opencode"),
+            "opencode --my-flag"
+        );
+        // Without an override, the registry default is used.
+        let default_config = GroveConfig::default();
+        assert_eq!(
+            default_config.resolved_agent_command("opencode"),
+            "opencode"
+        );
     }
 }
