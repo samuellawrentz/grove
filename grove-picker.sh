@@ -17,7 +17,15 @@ POPUP_WIDTH="95%"
 POPUP_HEIGHT="95%"
 POLL_LINES=50
 STATE_LINES=10
-STATE_FILE="/tmp/claude-panes.json"
+# User-scoped state-file path; must match src/agent.rs state_file_path() and
+# hooks/agent-tmux-status.sh.
+if [[ -n "${GROVE_STATE_FILE:-}" ]]; then
+  STATE_FILE="$GROVE_STATE_FILE"
+elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  STATE_FILE="${XDG_RUNTIME_DIR}/grove/claude-panes.json"
+else
+  STATE_FILE="${TMPDIR:-/tmp}/grove-${USER:-unknown}/claude-panes.json"
+fi
 
 # --- Claude state detection ---
 

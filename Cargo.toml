@@ -32,5 +32,4 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 strip = true

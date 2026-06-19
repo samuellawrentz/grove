@@ -191,13 +191,14 @@ pub fn run(task_id: Option<&str>, opts: &InitOptions, ctx: &Ctx) -> Result<(), G
         let base_branch = opts.base.unwrap_or(&repo_entry.default_branch);
         let worktree_path = task_dir.join(repo_name);
 
-        let created_branch = !git::branch_exists(bare_path, branch_name, verbose);
-        git::create_worktree(bare_path, &worktree_path, branch_name, base_branch, verbose)?;
-        journal.worktree(
+        crate::commands::util::provision_worktree(
+            &mut journal,
             bare_path,
             &worktree_path,
-            created_branch.then_some(branch_name.as_str()),
-        );
+            branch_name,
+            base_branch,
+            verbose,
+        )?;
 
         task_repos.push(TaskRepo {
             repo_name: repo_name.clone(),

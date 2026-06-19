@@ -12,11 +12,21 @@
 #   - cleanup : remove this pane's entry (session end)
 #
 # Requires: jq, and $TMUX_PANE set by tmux.
-# State file path overridable via $GROVE_STATE_FILE.
+# State file path overridable via $GROVE_STATE_FILE. The default is user-scoped
+# (never a fixed world-writable /tmp name another user could pre-create) and
+# must match `state_file_path()` in src/agent.rs:
+#   1. $GROVE_STATE_FILE  2. $XDG_RUNTIME_DIR/grove/...  3. /tmp/grove-<user>/...
 
 set -euo pipefail
 
-STATE_FILE="${GROVE_STATE_FILE:-/tmp/claude-panes.json}"
+if [[ -n "${GROVE_STATE_FILE:-}" ]]; then
+  STATE_FILE="$GROVE_STATE_FILE"
+elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  STATE_FILE="${XDG_RUNTIME_DIR}/grove/claude-panes.json"
+else
+  STATE_FILE="${TMPDIR:-/tmp}/grove-${USER:-unknown}/claude-panes.json"
+fi
+mkdir -p "$(dirname "$STATE_FILE")"
 PANE_ID="${TMUX_PANE:-}"
 
 # Not running inside tmux — nothing to track.

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::error::GroveError;
 
@@ -65,6 +66,24 @@ pub fn is_inside_tmux() -> bool {
 /// Get the name of the current tmux session. Only works inside tmux.
 pub fn current_session(verbose: bool) -> Result<String, GroveError> {
     run_tmux(&["display-message", "-p", "#{session_name}"], verbose)
+}
+
+/// Process-global cache of the current session name. It never changes for a
+/// running TUI, so resolve it once instead of querying tmux every refresh.
+static SESSION_CACHE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Resolve the current session at most once per process, memoizing via the given
+/// cell. Pure over the resolver so the once-only semantics are unit-testable.
+pub(crate) fn current_session_once(
+    cache: &OnceLock<Option<String>>,
+    resolver: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    cache.get_or_init(resolver).clone()
+}
+
+/// Cached `current_session`: resolves via tmux only on first call.
+pub fn current_session_cached(verbose: bool) -> Option<String> {
+    current_session_once(&SESSION_CACHE, || current_session(verbose).ok())
 }
 
 /// Create a named window in a specific session with a working directory.
@@ -187,22 +206,11 @@ pub fn capture_pane_tail(
     )
 }
 
-/// Capture the visible content of a tmux pane (with ANSI color codes).
-pub fn capture_pane(pane_id: &str, verbose: bool) -> Result<String, GroveError> {
-    run_tmux(
-        &[
-            "capture-pane",
-            "-t",
-            pane_id,
-            "-p",
-            "-e",
-            "-S",
-            "-",
-            "-E",
-            "-",
-        ],
-        verbose,
-    )
+/// Capture pane content using a caller-built argument vector (e.g. a bounded
+/// `-S -N` window). Keeps the bounding policy in one testable seam.
+pub fn capture_with_args(args: &[String], verbose: bool) -> Result<String, GroveError> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_tmux(&refs, verbose)
 }
 
 /// Switch the tmux client to a specific pane.
@@ -260,21 +268,64 @@ pub fn new_window(cwd: &str, cmd: Option<&str>, verbose: bool) -> Result<String,
 }
 
 /// Register tmux hooks to record new windows/panes as grove projects.
+///
+/// Idempotent per process: skips the redundant tmux round-trips when already
+/// run. When it does register, it always overwrites via `set-hook -g` with the
+/// freshly-built safe command, never preserving a possibly-stale hook.
 pub fn register_project_hooks(verbose: bool) {
+    static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REGISTERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+
     let grove_bin = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "grove".to_string());
 
-    let events = [
-        "after-new-window",
-        "after-split-window",
-        "after-new-session",
-    ];
-
-    for event in &events {
-        let cmd = format!("run-shell -b '{grove_bin} project-touch #{{pane_current_path}}'");
-        let _ = run_tmux(&["set-hook", "-g", event, &cmd], verbose);
+    for arg_vec in project_hook_set_args(&grove_bin) {
+        let args: Vec<&str> = arg_vec.iter().map(String::as_str).collect();
+        let _ = run_tmux(&args, verbose);
     }
+}
+
+/// The events whose hooks record new windows/panes as grove projects.
+const PROJECT_HOOK_EVENTS: [&str; 3] = [
+    "after-new-window",
+    "after-split-window",
+    "after-new-session",
+];
+
+/// Pure seam: the (event, value) pairs the hook registration overwrites.
+/// Every value is the safe `project_hook_command`, enabling tmux-free testing.
+fn project_hook_set_commands(grove_bin: &str) -> Vec<(&'static str, String)> {
+    let cmd = project_hook_command(grove_bin);
+    PROJECT_HOOK_EVENTS
+        .iter()
+        .map(|event| (*event, cmd.clone()))
+        .collect()
+}
+
+/// Pure seam: the full `set-hook -g <event> <value>` arg vectors to execute.
+/// Always the overwriting `-g` form, never the appending `-a` form.
+fn project_hook_set_args(grove_bin: &str) -> Vec<Vec<String>> {
+    project_hook_set_commands(grove_bin)
+        .into_iter()
+        .map(|(event, value)| {
+            vec![
+                "set-hook".to_string(),
+                "-g".to_string(),
+                event.to_string(),
+                value,
+            ]
+        })
+        .collect()
+}
+
+/// Build the per-event run-shell command for the project hook.
+/// Uses tmux's `q:` shell-quote modifier and double-quotes both the binary
+/// path and the pane path to prevent shell injection via the current path.
+fn project_hook_command(grove_bin: &str) -> String {
+    format!("run-shell -b '\"{grove_bin}\" project-touch \"#{{q:pane_current_path}}\"'")
 }
 
 /// Send raw keys to a tmux target (no -l flag, for keys like Enter).
@@ -288,6 +339,84 @@ pub fn send_raw_keys(target: &str, keys: &[&str], verbose: bool) -> Result<(), G
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// SESSION-cached-once (S16): the underlying resolver runs only once across
+    /// multiple `current_session_once` calls against the same cell.
+    #[test]
+    fn session_cached_once() {
+        let cache = OnceLock::new();
+        let calls = AtomicUsize::new(0);
+        let resolve = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some("sess".to_string())
+        };
+        assert_eq!(
+            current_session_once(&cache, resolve),
+            Some("sess".to_string())
+        );
+        assert_eq!(
+            current_session_once(&cache, resolve),
+            Some("sess".to_string())
+        );
+        assert_eq!(
+            current_session_once(&cache, resolve),
+            Some("sess".to_string())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_hook_uses_q_modifier() {
+        let cmd = project_hook_command("/usr/local/bin/grove");
+        assert!(
+            cmd.contains("#{q:pane_current_path}"),
+            "hook must use the q: shell-quote modifier: {cmd}"
+        );
+        assert!(
+            !cmd.contains("#{pane_current_path}"),
+            "hook must not splice the raw pane path: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_hook_register_overwrites_not_skips() {
+        let bin = "/usr/local/bin/grove";
+        let expected = project_hook_command(bin);
+        let cmds = project_hook_set_commands(bin);
+
+        assert_eq!(cmds.len(), 3, "must cover all 3 events: {cmds:?}");
+        for (_event, value) in &cmds {
+            assert_eq!(
+                *value, expected,
+                "every value must be the safe hook command"
+            );
+            assert!(
+                value.contains("#{q:pane_current_path}"),
+                "must use q: modifier: {value}"
+            );
+            assert!(
+                !value.contains("#{pane_current_path}"),
+                "must not splice raw pane path: {value}"
+            );
+        }
+
+        let args = project_hook_set_args(bin);
+        for arg_vec in &args {
+            assert!(
+                arg_vec.iter().any(|a| a == "set-hook"),
+                "must use set-hook: {arg_vec:?}"
+            );
+            assert!(
+                arg_vec.iter().any(|a| a == "-g"),
+                "must overwrite globally with -g: {arg_vec:?}"
+            );
+            assert!(
+                !arg_vec.iter().any(|a| a == "-a"),
+                "must not append with -a: {arg_vec:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_is_inside_tmux_with_var() {

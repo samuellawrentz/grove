@@ -328,6 +328,42 @@ fn init_rollback_on_terminal_tx_failure() {
 
 /// ADD-rollback-worktree-on-tx-failure (P0 / B2): a failed terminal tx leaves
 /// the new repo's worktree+branch gone and task_repos reflecting only the
+/// ARG-add-branch-base-validated (S25): `add` must run its --branch / --base
+/// through the same arg-injection validator as register/init, so a malicious
+/// value (leading `-`, shell metachars) is rejected before any git invocation.
+#[test]
+fn add_rejects_malicious_branch_and_base() {
+    let fix = TestFixture::new();
+    let bare_a = fix.create_bare_repo("repo-a");
+    let bare_b = fix.create_bare_repo("repo-b");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare_a.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["register", "repo-b", bare_b.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .success();
+
+    // Leading-dash branch (could be parsed as a git flag) is rejected.
+    fix.grove_cmd()
+        .args(["add", "TASK-1", "repo-b", "--branch=--upload-pack=evil"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid branch"));
+
+    // Shell-metachar base is rejected.
+    fix.grove_cmd()
+        .args(["add", "TASK-1", "repo-b", "--base", "main;rm -rf"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid base"));
+}
+
 /// original repo.
 #[test]
 fn add_rollback_worktree_on_tx_failure() {
@@ -376,6 +412,82 @@ fn add_rollback_worktree_on_tx_failure() {
         repos,
         vec!["repo-a".to_string()],
         "tx rollback keeps repo-a only"
+    );
+}
+
+/// PROVISION-rollback-equiv (init): a worktree provisioned on a *pre-existing*
+/// branch must NOT be force-deleted on rollback — only the worktree is removed.
+/// Pins the `created_branch.then_some(..)` discriminator that the shared helper
+/// must preserve identically for `init`.
+#[test]
+fn provision_rollback_equiv_init_reused_branch_preserved() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("repo-a");
+    // Pre-create the branch in the bare clone so init reuses (not creates) it.
+    std::process::Command::new("git")
+        .args(["branch", "TASK-1", "HEAD"])
+        .current_dir(&bare)
+        .output()
+        .expect("failed to create branch");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare.to_str().unwrap()])
+        .assert()
+        .success();
+
+    inject_insert_fault(&fix.db_path, "task_repos");
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .failure();
+
+    let task_dir = fix.tasks_dir.join("TASK-1");
+    assert!(!task_dir.exists(), "journal must remove the task dir");
+    let grove_bare = fix.repos_dir.join("repo-a.git");
+    assert!(
+        branch_exists(&grove_bare, "TASK-1"),
+        "reused branch must survive rollback (not force-deleted)"
+    );
+}
+
+/// PROVISION-rollback-equiv (add): same invariant as the init pin above, for the
+/// `add` call site — a reused branch survives rollback while the worktree is
+/// removed. Both commands must share the identical created-branch logic.
+#[test]
+fn provision_rollback_equiv_add_reused_branch_preserved() {
+    let fix = TestFixture::new();
+    let bare_a = fix.create_bare_repo("repo-a");
+    let bare_b = fix.create_bare_repo("repo-b");
+    // Pre-create the task branch in repo-b's bare clone so add reuses it.
+    std::process::Command::new("git")
+        .args(["branch", "TASK-1", "HEAD"])
+        .current_dir(&bare_b)
+        .output()
+        .expect("failed to create branch");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare_a.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["register", "repo-b", bare_b.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .success();
+
+    inject_insert_fault(&fix.db_path, "task_repos");
+    fix.grove_cmd()
+        .args(["add", "TASK-1", "repo-b"])
+        .assert()
+        .failure();
+
+    let wt_b = fix.tasks_dir.join("TASK-1").join("repo-b");
+    assert!(!wt_b.exists(), "journal must remove the repo-b worktree");
+    let grove_bare_b = fix.repos_dir.join("repo-b.git");
+    assert!(
+        branch_exists(&grove_bare_b, "TASK-1"),
+        "reused branch must survive rollback (not force-deleted)"
     );
 }
 
@@ -811,6 +923,115 @@ fn close_force_deletes_unmerged_branch() {
         !branch_exists(&fix.repos_dir.join("myrepo.git"), "TASK-1"),
         "unmerged branch should be force-deleted with -D"
     );
+}
+
+/// Lock a worktree via the canonical path git registered, so a non-force
+/// `git worktree remove` refuses to remove it.
+fn lock_worktree(bare: &std::path::Path, worktree: &std::path::Path) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(bare)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("git worktree list failed");
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let wt_name = worktree.file_name().unwrap().to_str().unwrap();
+    let registered = listing
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .find(|p| p.ends_with(wt_name))
+        .unwrap_or_else(|| panic!("worktree not registered; listing:\n{listing}"))
+        .to_string();
+
+    let lock = std::process::Command::new("git")
+        .arg("-C")
+        .arg(bare)
+        .args(["worktree", "lock", &registered])
+        .output()
+        .expect("git worktree lock failed");
+    assert!(
+        lock.status.success(),
+        "lock failed: {}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+}
+
+/// CLOSE-nonforce-removal-fail-preserves (S4): a non-force close whose worktree
+/// removal fails must destroy NOTHING — the task row and worktree dir survive so
+/// the task stays fully re-closable. Force the failure by locking the worktree.
+#[test]
+fn close_nonforce_removal_fail_preserves_state() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    let worktree = fix.tasks_dir.join("TASK-1").join("myrepo");
+    assert!(worktree.exists(), "worktree should exist after init");
+
+    // Lock the worktree so `git worktree remove` (non-force) refuses to remove it.
+    // Use the path git itself registered (canonicalized) to avoid /var vs
+    // /private/var mismatches on macOS.
+    lock_worktree(&fix.repos_dir.join("myrepo.git"), &worktree);
+
+    // Non-force close must abort (non-zero) and leave everything intact.
+    fix.grove_cmd().args(["close", "TASK-1"]).assert().failure();
+
+    assert!(
+        worktree.exists(),
+        "worktree dir must survive an aborted non-force close"
+    );
+    fix.grove_cmd()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("TASK-1"));
+}
+
+/// CLOSE-idempotent-retry (N4): a `--force` re-close after the aborted non-force
+/// close succeeds and fully cleans up (worktree gone, task row gone).
+#[test]
+fn close_force_retry_after_aborted_nonforce() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("myrepo");
+
+    fix.grove_cmd()
+        .args(["register", "myrepo", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "myrepo"])
+        .assert()
+        .success();
+
+    let worktree = fix.tasks_dir.join("TASK-1").join("myrepo");
+    lock_worktree(&fix.repos_dir.join("myrepo.git"), &worktree);
+
+    // Non-force aborts, leaving the task re-closable.
+    fix.grove_cmd().args(["close", "TASK-1"]).assert().failure();
+
+    // Force re-close succeeds and fully cleans up.
+    fix.grove_cmd()
+        .args(["close", "--force", "TASK-1"])
+        .assert()
+        .success();
+
+    assert!(
+        !worktree.exists(),
+        "worktree dir must be gone after force close"
+    );
+    fix.grove_cmd()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No active tasks"));
 }
 
 #[test]

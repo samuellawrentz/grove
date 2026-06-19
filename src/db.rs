@@ -182,30 +182,84 @@ impl Db {
         let version: u32 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        // Each step runs atomically: the batch and the version bump commit
+        // together, so a crash mid-step leaves user_version unchanged and the
+        // step replays cleanly on the next open.
         if version < 1 {
-            self.conn.execute_batch(SCHEMA_V1)?;
-            self.conn.pragma_update(None, "user_version", 1)?;
+            self.transaction(|| {
+                self.conn.execute_batch(SCHEMA_V1)?;
+                self.conn.pragma_update(None, "user_version", 1)?;
+                Ok(())
+            })?;
         }
         if version < 2 {
-            self.conn.execute_batch(SCHEMA_V2)?;
-            self.conn.pragma_update(None, "user_version", 2)?;
+            self.transaction(|| {
+                self.conn.execute_batch(SCHEMA_V2)?;
+                self.conn.pragma_update(None, "user_version", 2)?;
+                Ok(())
+            })?;
         }
         if version < 3 {
-            self.conn.execute_batch(SCHEMA_V3)?;
-            self.conn.pragma_update(None, "user_version", 3)?;
+            self.transaction(|| {
+                self.conn.execute_batch(SCHEMA_V3)?;
+                self.conn.pragma_update(None, "user_version", 3)?;
+                Ok(())
+            })?;
         }
         if version < 4 {
-            self.conn.execute_batch(SCHEMA_V4)?;
-            self.conn.pragma_update(None, "user_version", 4)?;
+            self.transaction(|| {
+                self.conn.execute_batch(SCHEMA_V4)?;
+                self.conn.pragma_update(None, "user_version", 4)?;
+                Ok(())
+            })?;
         }
         if version < 5 {
-            // Rebuild task_repos with ON DELETE CASCADE — SQLite can't ALTER a
-            // FK in place. Existing rows are FK-consistent so the copy passes
-            // with foreign_keys ON.
-            self.conn.execute_batch(SCHEMA_V5)?;
-            self.conn.pragma_update(None, "user_version", 5)?;
+            self.migrate_v5()?;
         }
         Ok(())
+    }
+
+    /// V5: rebuild task_repos with ON DELETE CASCADE. SQLite can't ALTER a FK in
+    /// place, so the table is recreated and rows copied across.
+    ///
+    /// Written as idempotent Rust (not a static batch) so a half-applied V5 —
+    /// from a crash between steps — re-runs cleanly: the staging table is
+    /// created only if absent, rows are copied only while the old `task_repos`
+    /// still exists, and the rename only happens once the old table is gone.
+    fn migrate_v5(&self) -> Result<(), GroveError> {
+        self.transaction(|| {
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS task_repos_v5 (
+                     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                     repo_name   TEXT NOT NULL,
+                     worktree    TEXT NOT NULL,
+                     branch      TEXT NOT NULL,
+                     PRIMARY KEY (task_id, repo_name)
+                 );",
+            )?;
+            if self.table_exists("task_repos")? {
+                self.conn.execute_batch(
+                    "INSERT OR IGNORE INTO task_repos_v5 (task_id, repo_name, worktree, branch)
+                         SELECT task_id, repo_name, worktree, branch FROM task_repos;
+                     DROP TABLE task_repos;",
+                )?;
+            }
+            if !self.table_exists("task_repos")? {
+                self.conn
+                    .execute_batch("ALTER TABLE task_repos_v5 RENAME TO task_repos;")?;
+            }
+            self.conn.pragma_update(None, "user_version", 5)?;
+            Ok(())
+        })
+    }
+
+    fn table_exists(&self, name: &str) -> Result<bool, GroveError> {
+        let n: u32 = self.conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     // ── Pane agents ───────────────────────────────────────────────────────────
@@ -339,18 +393,23 @@ impl Db {
             return Ok(0);
         }
         let data = std::fs::read_to_string(&recents_path)?;
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-        let mut count = 0;
-        for entry in &entries {
-            if let (Some(path), Some(timestamp)) =
-                (entry["path"].as_str(), entry["timestamp"].as_u64())
-            {
-                self.upsert_project_with_timestamp(path, timestamp)?;
-                count += 1;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+        let count = self.transaction(|| {
+            let mut count = 0;
+            for entry in &entries {
+                if let (Some(path), Some(timestamp)) =
+                    (entry["path"].as_str(), entry["timestamp"].as_u64())
+                {
+                    self.upsert_project_with_timestamp(path, timestamp)?;
+                    count += 1;
+                }
             }
+            Ok(count)
+        })?;
+        if count > 0 {
+            let migrated = grove_dir.join("recents.json.migrated");
+            std::fs::rename(&recents_path, &migrated)?;
         }
-        let migrated = grove_dir.join("recents.json.migrated");
-        let _ = std::fs::rename(&recents_path, &migrated);
         Ok(count)
     }
 
@@ -361,76 +420,83 @@ impl Db {
             return Ok(0);
         }
         let data = std::fs::read_to_string(&state_path)?;
-        let state: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
-        let mut count = 0;
+        let state: serde_json::Value = serde_json::from_str(&data)?;
 
-        // Migrate repos
-        if let Some(repos) = state["repos"].as_object() {
-            for (_key, repo) in repos {
-                let entry = RepoEntry {
-                    name: repo["name"].as_str().unwrap_or_default().to_string(),
-                    url: repo["url"].as_str().unwrap_or_default().to_string(),
-                    path: PathBuf::from(repo["path"].as_str().unwrap_or_default()),
-                    default_branch: repo["default_branch"]
-                        .as_str()
-                        .unwrap_or("main")
-                        .to_string(),
-                    registered_at: repo["registered_at"]
-                        .as_str()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|d| d.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
-                    last_synced_at: repo["last_synced_at"]
-                        .as_str()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|d| d.with_timezone(&Utc)),
-                };
-                if !entry.name.is_empty() {
-                    let _ = self.upsert_repo(&entry);
-                    count += 1;
+        let count = self.transaction(|| {
+            let mut count = 0;
+
+            // Migrate repos
+            if let Some(repos) = state["repos"].as_object() {
+                for (_key, repo) in repos {
+                    let entry = RepoEntry {
+                        name: repo["name"].as_str().unwrap_or_default().to_string(),
+                        url: repo["url"].as_str().unwrap_or_default().to_string(),
+                        path: PathBuf::from(repo["path"].as_str().unwrap_or_default()),
+                        default_branch: repo["default_branch"]
+                            .as_str()
+                            .unwrap_or("main")
+                            .to_string(),
+                        registered_at: repo["registered_at"]
+                            .as_str()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&Utc))
+                            .unwrap_or_else(Utc::now),
+                        last_synced_at: repo["last_synced_at"]
+                            .as_str()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&Utc)),
+                    };
+                    if !entry.name.is_empty() {
+                        self.upsert_repo(&entry)?;
+                        count += 1;
+                    }
                 }
             }
-        }
 
-        // Migrate tasks
-        if let Some(tasks) = state["tasks"].as_object() {
-            for (_key, task) in tasks {
-                let repos: Vec<TaskRepo> = task["repos"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|tr| {
-                                Some(TaskRepo {
-                                    repo_name: tr["repo_name"].as_str()?.to_string(),
-                                    worktree_path: PathBuf::from(tr["worktree_path"].as_str()?),
-                                    branch: tr["branch"].as_str()?.to_string(),
+            // Migrate tasks
+            if let Some(tasks) = state["tasks"].as_object() {
+                for (_key, task) in tasks {
+                    let repos: Vec<TaskRepo> = task["repos"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|tr| {
+                                    Some(TaskRepo {
+                                        repo_name: tr["repo_name"].as_str()?.to_string(),
+                                        worktree_path: PathBuf::from(tr["worktree_path"].as_str()?),
+                                        branch: tr["branch"].as_str()?.to_string(),
+                                    })
                                 })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                                .collect()
+                        })
+                        .unwrap_or_default();
 
-                let entry = TaskEntry {
-                    id: task["id"].as_str().unwrap_or_default().to_string(),
-                    path: PathBuf::from(task["path"].as_str().unwrap_or_default()),
-                    repos,
-                    created_at: task["created_at"]
-                        .as_str()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|d| d.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
-                    tmux_window: task["tmux_window"].as_str().map(String::from),
-                    pane_id: task["pane_id"].as_str().map(String::from),
-                };
-                if !entry.id.is_empty() {
-                    let _ = self.upsert_task(&entry);
-                    count += 1;
+                    let entry = TaskEntry {
+                        id: task["id"].as_str().unwrap_or_default().to_string(),
+                        path: PathBuf::from(task["path"].as_str().unwrap_or_default()),
+                        repos,
+                        created_at: task["created_at"]
+                            .as_str()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&Utc))
+                            .unwrap_or_else(Utc::now),
+                        tmux_window: task["tmux_window"].as_str().map(String::from),
+                        pane_id: task["pane_id"].as_str().map(String::from),
+                    };
+                    if !entry.id.is_empty() {
+                        self.upsert_task(&entry)?;
+                        count += 1;
+                    }
                 }
             }
-        }
 
-        let migrated = grove_dir.join("state.json.migrated");
-        let _ = std::fs::rename(&state_path, &migrated);
+            Ok(count)
+        })?;
+
+        if count > 0 {
+            let migrated = grove_dir.join("state.json.migrated");
+            std::fs::rename(&state_path, &migrated)?;
+        }
         Ok(count)
     }
 
@@ -676,22 +742,6 @@ CREATE TABLE IF NOT EXISTS pane_overrides (
     pane_id   TEXT PRIMARY KEY,
     marked_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-";
-
-// Rebuild task_repos with ON DELETE CASCADE. SQLite cannot add a FK action via
-// ALTER, so the table is recreated and its rows copied across.
-const SCHEMA_V5: &str = "
-CREATE TABLE task_repos_v5 (
-    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    repo_name   TEXT NOT NULL,
-    worktree    TEXT NOT NULL,
-    branch      TEXT NOT NULL,
-    PRIMARY KEY (task_id, repo_name)
-);
-INSERT INTO task_repos_v5 (task_id, repo_name, worktree, branch)
-    SELECT task_id, repo_name, worktree, branch FROM task_repos;
-DROP TABLE task_repos;
-ALTER TABLE task_repos_v5 RENAME TO task_repos;
 ";
 
 #[cfg(test)]
@@ -1046,5 +1096,214 @@ mod tests {
                 assert_eq!(a.branch, b.branch);
             }
         }
+    }
+
+    // ── Migration data-loss safety (S2) ─────────────────────────────────────────
+
+    fn grove_temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("grove-mig-{}", std::process::id()));
+        let dir = dir.join(format!("{:?}", std::time::Instant::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// MIG-corrupt-errors-preserves-file: corrupt state.json must Err and stay put.
+    #[test]
+    fn migrate_state_corrupt_errors_preserves_file() {
+        let db = open_temp();
+        let dir = grove_temp_dir();
+        let src = dir.join("state.json");
+        std::fs::write(&src, "{ this is not json").unwrap();
+
+        let res = db.migrate_state_json(&dir);
+        assert!(res.is_err());
+        assert!(src.exists());
+        assert!(!dir.join("state.json.migrated").exists());
+    }
+
+    /// MIG-corrupt-errors-preserves-file (recents variant).
+    #[test]
+    fn migrate_recents_corrupt_errors_preserves_file() {
+        let db = open_temp();
+        let dir = grove_temp_dir();
+        let src = dir.join("recents.json");
+        std::fs::write(&src, "{ not json").unwrap();
+
+        let res = db.migrate_recents(&dir);
+        assert!(res.is_err());
+        assert!(src.exists());
+        assert!(!dir.join("recents.json.migrated").exists());
+    }
+
+    /// MIG-zero-yield-not-renamed: valid JSON, no usable entries => Ok(0), file kept.
+    #[test]
+    fn migrate_state_zero_yield_not_renamed() {
+        let db = open_temp();
+        let dir = grove_temp_dir();
+        let src = dir.join("state.json");
+        std::fs::write(
+            &src,
+            r#"{"repos":{"a":{"name":"","url":"u","path":"p"}},"tasks":{"b":{"id":"","path":"p"}}}"#,
+        )
+        .unwrap();
+
+        let count = db.migrate_state_json(&dir).unwrap();
+        assert_eq!(count, 0);
+        assert!(src.exists());
+        assert!(!dir.join("state.json.migrated").exists());
+    }
+
+    /// MIG-zero-yield-not-renamed (recents variant).
+    #[test]
+    fn migrate_recents_zero_yield_not_renamed() {
+        let db = open_temp();
+        let dir = grove_temp_dir();
+        let src = dir.join("recents.json");
+        std::fs::write(&src, r#"[{"path":"/x"}]"#).unwrap();
+
+        let count = db.migrate_recents(&dir).unwrap();
+        assert_eq!(count, 0);
+        assert!(src.exists());
+        assert!(!dir.join("recents.json.migrated").exists());
+    }
+
+    /// MIG-valid-imports-then-renames: happy path imports rows and renames source.
+    #[test]
+    fn migrate_state_valid_imports_then_renames() {
+        let db = open_temp();
+        let dir = grove_temp_dir();
+        let src = dir.join("state.json");
+        std::fs::write(
+            &src,
+            r#"{"repos":{"a":{"name":"grove","url":"u","path":"/p","default_branch":"main"}}}"#,
+        )
+        .unwrap();
+
+        let count = db.migrate_state_json(&dir).unwrap();
+        assert!(count > 0);
+        assert!(!src.exists());
+        assert!(dir.join("state.json.migrated").exists());
+        assert!(db.list_repos().unwrap().iter().any(|r| r.name == "grove"));
+    }
+
+    // ── Schema migration integrity (task S3) ──────────────────────────────────
+
+    /// Build a `Db` over a fresh temp file WITHOUT running migrate, so tests can
+    /// stage a partial/old schema first. Mirrors `open_path` connection setup.
+    fn open_raw() -> Db {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        std::mem::forget(f);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+        Db { conn }
+    }
+
+    fn user_version(db: &Db) -> u32 {
+        db.conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    fn task_repos_cascades(db: &Db) -> bool {
+        let sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_repos'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        sql.contains("ON DELETE CASCADE")
+    }
+
+    /// MIG-v0-to-v5-fresh: fresh DB reaches v5 with the cascading task_repos.
+    #[test]
+    fn mig_v0_to_v5_fresh() {
+        let db = open_temp();
+        assert_eq!(user_version(&db), 5);
+        assert!(task_repos_cascades(&db));
+    }
+
+    /// MIG-incremental-v1-to-v5: a v1-only DB migrates up to v5 preserving rows.
+    #[test]
+    fn mig_incremental_v1_to_v5() {
+        let db = open_raw();
+        db.conn.execute_batch(SCHEMA_V1).unwrap();
+        db.conn.pragma_update(None, "user_version", 1).unwrap();
+        db.conn
+            .execute("INSERT INTO tasks (id, path) VALUES ('t1', '/p')", [])
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO task_repos (task_id, repo_name, worktree, branch)
+                 VALUES ('t1', 'r1', '/wt', 'main')",
+                [],
+            )
+            .unwrap();
+
+        db.migrate().unwrap();
+
+        assert_eq!(user_version(&db), 5);
+        assert!(task_repos_cascades(&db));
+        let n: u32 = db
+            .conn
+            .query_row("SELECT count(*) FROM task_repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// MIG-v5-partial-rerun-recovers: a crashed V5 (v5 table exists, version
+    /// still 4) re-runs cleanly without "table already exists", reaching v5
+    /// with rows intact.
+    #[test]
+    fn mig_v5_partial_rerun_recovers() {
+        let db = open_raw();
+        // Bring DB up to v4 with a row in the old task_repos.
+        db.conn.execute_batch(SCHEMA_V1).unwrap();
+        db.conn.execute_batch(SCHEMA_V2).unwrap();
+        db.conn.execute_batch(SCHEMA_V3).unwrap();
+        db.conn.execute_batch(SCHEMA_V4).unwrap();
+        db.conn.pragma_update(None, "user_version", 4).unwrap();
+        db.conn
+            .execute("INSERT INTO tasks (id, path) VALUES ('t1', '/p')", [])
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO task_repos (task_id, repo_name, worktree, branch)
+                 VALUES ('t1', 'r1', '/wt', 'main')",
+                [],
+            )
+            .unwrap();
+        // Simulate a crash midway through V5: the new table was created but the
+        // version bump never happened.
+        db.conn
+            .execute_batch(
+                "CREATE TABLE task_repos_v5 (
+                     task_id   TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                     repo_name TEXT NOT NULL,
+                     worktree  TEXT NOT NULL,
+                     branch    TEXT NOT NULL,
+                     PRIMARY KEY (task_id, repo_name)
+                 );
+                 INSERT INTO task_repos_v5 (task_id, repo_name, worktree, branch)
+                     SELECT task_id, repo_name, worktree, branch FROM task_repos;",
+            )
+            .unwrap();
+
+        db.migrate().unwrap();
+
+        assert_eq!(user_version(&db), 5);
+        assert!(task_repos_cascades(&db));
+        let n: u32 = db
+            .conn
+            .query_row("SELECT count(*) FROM task_repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
