@@ -1,0 +1,77 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "grove",
+  "title": "Grove",
+  "description": "Manage multi-repo Grove workspaces, tasks, and tmux/Claude sessions from Raycast.",
+  "icon": "command-icon.png",
+  "author": "samuel_lawerence",
+  "categories": ["Developer Tools"],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "list-tasks",
+      "title": "List Grove Tasks",
+      "subtitle": "Grove",
+      "description": "Browse active tasks; attach, view status, or close.",
+      "mode": "view"
+    },
+    {
+      "name": "create-task",
+      "title": "Create Grove Task",
+      "subtitle": "Grove",
+      "description": "Create a task with worktrees from registered repos.",
+      "mode": "view"
+    },
+    {
+      "name": "repos",
+      "title": "Grove Repos",
+      "subtitle": "Grove",
+      "description": "List registered repos and sync them.",
+      "mode": "view"
+    },
+    {
+      "name": "sync-all",
+      "title": "Sync All Grove Repos",
+      "subtitle": "Grove",
+      "description": "Fetch updates for all registered repos.",
+      "mode": "no-view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "grovePath",
+      "title": "Grove Binary Path",
+      "description": "Absolute path to the grove executable.",
+      "type": "textfield",
+      "required": false,
+      "default": "/Users/samuel.lawerence/.cargo/bin/grove"
+    },
+    {
+      "name": "terminalApp",
+      "title": "Terminal App",
+      "description": "Terminal where tmux runs; focused on attach.",
+      "type": "dropdown",
+      "required": false,
+      "default": "Ghostty",
+      "data": [
+        { "title": "Ghostty", "value": "Ghostty" },
+        { "title": "iTerm", "value": "iTerm" },
+        { "title": "Terminal", "value": "Terminal" }
+      ]
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.80.0",
+    "@raycast/utils": "^1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "19.0.10",
+    "typescript": "^5.4.0"
+  },
+  "scripts": {
+    "dev": "ray develop",
+    "build": "ray build -e dist",
+    "lint": "ray lint"
+  }
+}
