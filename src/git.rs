@@ -65,13 +65,20 @@ fn ensure_fetch_refspec(bare_path: &Path, verbose: bool) -> Result<(), GroveErro
     Ok(())
 }
 
+/// Build the `git clone --bare` argument vector with `--` before the url and
+/// target, so a url/target beginning with `-` can never be parsed as a flag.
+/// Factored out as a pure seam so the `--` guard is unit-testable.
+fn bare_clone_args<'a>(url: &'a str, target: &'a str) -> Vec<&'a str> {
+    vec!["clone", "--bare", "--", url, target]
+}
+
 /// Clone a bare repository. Returns the default branch name.
 pub fn bare_clone(url: &str, target_path: &Path, verbose: bool) -> Result<String, GroveError> {
     let target_str = target_path
         .to_str()
         .ok_or_else(|| GroveError::General("invalid path".to_string()))?;
 
-    run_git(&["clone", "--bare", url, target_str], None, verbose)?;
+    run_git(&bare_clone_args(url, target_str), None, verbose)?;
 
     // Configure fetch refspec so `git fetch` populates refs/remotes/origin/*
     ensure_fetch_refspec(target_path, verbose)?;
@@ -108,6 +115,14 @@ pub fn fetch_repo(bare_path: &Path, prune: bool, verbose: bool) -> Result<(), Gr
 /// Fast-forward a local branch to match its remote tracking branch.
 /// Runs `git update-ref refs/heads/<branch> refs/remotes/origin/<branch>`.
 /// Silently skips if the remote ref doesn't exist.
+///
+/// WARNING: `update-ref` moves the ref UNCONDITIONALLY — it is not ff-only. If
+/// the local default branch has diverged (carries commits not in origin), those
+/// local-only commits are silently discarded (orphaned). This is safe for the
+/// bare-repo default branch grove manages (never committed to directly), but is
+/// a footgun. See SYNC-diverged-default-branch test for the pinned behavior.
+/// TODO: harden to a ff-only update (`merge-base --is-ancestor` guard) if any
+/// caller ever commits to the local default ref.
 pub fn update_default_branch(
     bare_path: &Path,
     branch: &str,
@@ -252,4 +267,227 @@ pub fn has_uncommitted_changes(worktree_path: &Path, verbose: bool) -> Result<bo
 
     let output = run_git(&["-C", wt_str, "status", "--porcelain"], None, verbose)?;
     Ok(!output.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// ARG-register-url-double-dash (S25): the bare-clone arg vector must place
+    /// `--` before the url so a url beginning with `-` is treated as a positional
+    /// argument, never a git flag.
+    #[test]
+    fn bare_clone_args_double_dash_before_url() {
+        let args = bare_clone_args("-oProxyCommand=evil", "/tmp/x.git");
+        let dd = args.iter().position(|a| *a == "--").expect("-- present");
+        let url = args
+            .iter()
+            .position(|a| *a == "-oProxyCommand=evil")
+            .expect("url present");
+        assert!(dd < url, "-- must come before the url: {args:?}");
+    }
+
+    /// Run git, asserting success (test fixture setup only).
+    fn git(args: &[&str], cwd: &Path) {
+        let out = git_command(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Build a normal repo with one commit on `main`, then clone --bare.
+    /// Returns (tmp, work_dir, bare_path). `tmp` must outlive usage.
+    fn setup_bare() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&["init", "-b", "main"], &work);
+        git(&["config", "user.email", "test@test.com"], &work);
+        git(&["config", "user.name", "Test"], &work);
+        std::fs::write(work.join("README.md"), "# repo\n").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-m", "initial commit"], &work);
+
+        let bare = tmp.path().join("repo.git");
+        git(
+            &[
+                "clone",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+        ensure_fetch_refspec(&bare, false).unwrap();
+        run_git(&["fetch", "origin"], Some(&bare), false).unwrap();
+        (tmp, work, bare)
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_path() -> PathBuf {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(OsStr::from_bytes(&[0x66, 0x80, 0x80]))
+    }
+
+    #[test]
+    fn git_delete_d_preserves_unmerged() {
+        let (_tmp, _work, bare) = setup_bare();
+        // Branch from main, add an unmerged commit (in a worktree).
+        let wt = _tmp.path().join("wt");
+        create_worktree(&bare, &wt, "feature", "main", false).unwrap();
+        git(&["config", "user.email", "test@test.com"], &wt);
+        git(&["config", "user.name", "Test"], &wt);
+        std::fs::write(wt.join("f.txt"), "x").unwrap();
+        git(&["add", "."], &wt);
+        git(&["commit", "-m", "unmerged"], &wt);
+        // Detach the worktree so the branch can be deleted, but keep its commits.
+        remove_worktree(&bare, &wt, false).unwrap();
+
+        let res = delete_branch(&bare, "feature", false, false);
+        assert!(res.is_err(), "safe delete of unmerged branch must fail");
+        assert!(branch_exists(&bare, "feature", false), "branch preserved");
+    }
+
+    #[test]
+    fn git_delete_force_removes() {
+        let (_tmp, _work, bare) = setup_bare();
+        let wt = _tmp.path().join("wt");
+        create_worktree(&bare, &wt, "feature", "main", false).unwrap();
+        git(&["config", "user.email", "test@test.com"], &wt);
+        git(&["config", "user.name", "Test"], &wt);
+        std::fs::write(wt.join("f.txt"), "x").unwrap();
+        git(&["add", "."], &wt);
+        git(&["commit", "-m", "unmerged"], &wt);
+        remove_worktree(&bare, &wt, false).unwrap();
+
+        delete_branch(&bare, "feature", true, false).unwrap();
+        assert!(!branch_exists(&bare, "feature", false), "branch removed");
+    }
+
+    #[test]
+    fn git_remove_worktree() {
+        let (_tmp, _work, bare) = setup_bare();
+        let wt = _tmp.path().join("wt");
+        create_worktree(&bare, &wt, "feature", "main", false).unwrap();
+        assert!(wt.join("README.md").exists());
+
+        remove_worktree(&bare, &wt, false).unwrap();
+        prune_worktrees(&bare, false).unwrap();
+        assert!(!wt.exists(), "worktree dir gone after remove");
+    }
+
+    #[test]
+    fn git_uncommitted_true_false() {
+        let (_tmp, _work, bare) = setup_bare();
+        let wt = _tmp.path().join("wt");
+        create_worktree(&bare, &wt, "feature", "main", false).unwrap();
+
+        assert!(!has_uncommitted_changes(&wt, false).unwrap(), "clean");
+        std::fs::write(wt.join("dirty.txt"), "y").unwrap();
+        assert!(has_uncommitted_changes(&wt, false).unwrap(), "dirty");
+    }
+
+    #[test]
+    fn git_create_worktree() {
+        let (_tmp, _work, bare) = setup_bare();
+        let wt = _tmp.path().join("wt");
+        create_worktree(&bare, &wt, "feature", "main", false).unwrap();
+
+        assert!(wt.join("README.md").exists(), "worktree checked out");
+        assert!(branch_exists(&bare, "feature", false), "branch created");
+        let head = run_git(
+            &[
+                "-C",
+                wt.to_str().unwrap(),
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ],
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(head.trim(), "feature");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_invalid_utf8_path_errs() {
+        let bad = non_utf8_path();
+        assert!(bad.to_str().is_none(), "fixture path must be non-utf8");
+        let bare = Path::new("/tmp/does-not-matter.git");
+
+        let e = create_worktree(bare, &bad, "b", "main", false).unwrap_err();
+        assert!(matches!(e, GroveError::General(ref m) if m.contains("invalid worktree path")));
+
+        let e = remove_worktree(bare, &bad, false).unwrap_err();
+        assert!(matches!(e, GroveError::General(ref m) if m.contains("invalid worktree path")));
+
+        let e = has_uncommitted_changes(&bad, false).unwrap_err();
+        assert!(matches!(e, GroveError::General(ref m) if m.contains("invalid worktree path")));
+    }
+
+    #[test]
+    fn sync_diverged_default_branch() {
+        // SYNC-diverged-default-branch: local refs/heads/main carries a commit
+        // not in origin/main (diverged). update_default_branch does an
+        // UNCONDITIONAL update-ref, so the local-only commit is OVERWRITTEN
+        // (discarded) — this test pins that current, lossy behavior.
+        let (_tmp, work, bare) = setup_bare();
+
+        // origin (the bare's remote-tracking) is at the initial commit.
+        let origin_head = run_git(
+            &["rev-parse", "refs/remotes/origin/main"],
+            Some(&bare),
+            false,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Forge a local-only commit on the bare's refs/heads/main, diverging it
+        // from origin/main. Use the work repo to produce a new commit object,
+        // then point the bare's local main at it.
+        std::fs::write(work.join("local.txt"), "local-only").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-m", "local-only divergence"], &work);
+        let local_only = run_git(&["rev-parse", "HEAD"], Some(&work), false)
+            .unwrap()
+            .trim()
+            .to_string();
+        // Push the commit OBJECT into the bare under refs/heads/main (a forced
+        // local divergence) WITHOUT touching refs/remotes/origin/main.
+        run_git(
+            &[
+                "push",
+                "--force",
+                bare.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+            Some(&work),
+            false,
+        )
+        .unwrap();
+        assert_ne!(local_only, origin_head, "precondition: diverged");
+
+        update_default_branch(&bare, "main", false).unwrap();
+
+        let after = run_git(&["rev-parse", "refs/heads/main"], Some(&bare), false)
+            .unwrap()
+            .trim()
+            .to_string();
+        // PINNED: local main is reset to origin/main; the local-only commit is
+        // discarded (orphaned). See the WARNING/TODO on update_default_branch.
+        assert_eq!(after, origin_head, "local main overwritten to origin/main");
+        assert_ne!(after, local_only, "local-only commit discarded");
+    }
 }

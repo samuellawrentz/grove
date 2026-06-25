@@ -1,6 +1,6 @@
 [package]
 name = "grove"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 
@@ -32,5 +32,4 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 strip = true

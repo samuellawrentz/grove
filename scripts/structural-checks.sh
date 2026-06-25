@@ -54,6 +54,22 @@ else
     ok "G3: flat-row move arithmetic is single-sourced in flat_rows.rs"
 fi
 
+# ── PANIC: release profile must not abort (guards S5; restores unwind journal) ─
+if grep -nE '^[[:space:]]*panic[[:space:]]*=[[:space:]]*"abort"' Cargo.toml >/dev/null 2>&1; then
+    bad "PANIC: [profile.release] sets panic=\"abort\" (must be unwind so TerminalGuard/journal Drop runs)"
+else
+    ok "PANIC: release profile does not set panic=abort"
+fi
+
+# ── HOOK: no bare #{pane_current_path} in a single-quoted run-shell (guards S1) ─
+hook_hits=$(grep -rnE "run-shell.*'[^']*#\{pane_current_path\}" src --include='*.rs' 2>/dev/null || true)
+if [ -n "$hook_hits" ]; then
+    bad "HOOK: bare #{pane_current_path} in a single-quoted run-shell string (use #{q:pane_current_path}):"
+    printf '%s\n' "$hook_hits" | sed 's/^/       /'
+else
+    ok "HOOK: no unquoted #{pane_current_path} in run-shell strings"
+fi
+
 if [ "$fail" -ne 0 ]; then
     printf '\n\033[31mstructural checks FAILED\033[0m\n'
     exit 1

@@ -45,6 +45,14 @@ pub(crate) fn run_event_loop(
             signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&sigusr1_flag));
     }
 
+    // Paint one frame from the cheaply-constructed state BEFORE the blocking
+    // initial refresh, so startup is not perceived as a hang. No key is read
+    // until after this completes (the input poll lives inside the loop below).
+    terminal
+        .draw(|f| ui::draw(f, &mut *app))
+        .map_err(|e| GroveError::Tui(format!("draw error: {e}")))?;
+    app.initial_refresh();
+
     loop {
         // Draw
         terminal
@@ -96,7 +104,7 @@ pub(crate) fn run_event_loop(
                     let _ = std::io::stdin().read_line(&mut String::new());
 
                     if let Err(e) = status {
-                        app.status_message = Some(format!("command failed: {e}"));
+                        app.ui.status_message = Some(format!("command failed: {e}"));
                     }
                 });
 
@@ -119,7 +127,7 @@ pub(crate) fn run_event_loop(
                     if output.status.success() {
                         let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if !dir.is_empty() {
-                            app.overlay = Overlay::OpenChoice { dir };
+                            app.ui.overlay = Overlay::OpenChoice { dir };
                         }
                     }
                 }
@@ -130,15 +138,16 @@ pub(crate) fn run_event_loop(
             PendingShell::None => {}
         }
 
-        // Background refresh is gated on no active overlay so a tmux hook firing
-        // mid-search/-prompt can't rebuild the tree and yank the cursor.
-        if !has_event && !app.overlay_active() {
+        // Background refresh is gated on no input-capturing surface (overlay or
+        // notepad) so a tmux hook firing mid-typing can't rebuild the tree and
+        // yank the cursor.
+        if !has_event && app.should_background_refresh() {
             // Timeout: refresh data
             app.on_tick();
         }
 
-        // Check SIGUSR1 flag (also gated on overlay state)
-        if sigusr1_flag.swap(false, Ordering::Relaxed) && !app.overlay_active() {
+        // Check SIGUSR1 flag (also gated on input-capturing surfaces)
+        if sigusr1_flag.swap(false, Ordering::Relaxed) && app.should_background_refresh() {
             app.refresh_tree();
         }
     }

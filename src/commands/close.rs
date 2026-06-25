@@ -58,18 +58,14 @@ pub fn run(
         }
     }
 
-    if let Some(ref target) = task.tmux_window {
-        if let Err(e) = crate::tmux::kill_window(target, verbose) {
-            if verbose {
-                eprintln!("Warning: failed to kill tmux window: {e}");
-            }
-        }
-    }
-
     let all_repos = db.list_repos()?;
 
-    // One pass per task_repo: resolve the bare path once, remove the worktree
-    // (worktree-before-branch ordering preserved), then delete the branch + prune.
+    // Partial-failure safety (S4): on the non-force path, confirm every worktree
+    // is gone BEFORE destroying anything else (tmux window, task dir, DB row).
+    // A non-force removal failure (e.g. a locked worktree) aborts the whole close
+    // with the task row, worktree dir, and tmux window all intact, so the task
+    // stays fully re-closable. The force path force-removes the dir directly and
+    // proceeds, preserving the N4 idempotency invariant.
     for task_repo in &task.repos {
         let bare_path = all_repos
             .iter()
@@ -85,13 +81,48 @@ pub fn run(
                             "git worktree remove failed for '{}', removed directory directly: {e}",
                             task_repo.repo_name
                         ));
+                    } else if task_repo.worktree_path.exists() {
+                        // The worktree dir is still on disk and git refused to
+                        // remove it (e.g. locked): abort with everything intact.
+                        return Err(GroveError::General(format!(
+                            "failed to remove worktree for '{}' in task '{task_id}': {e}. \
+                             Nothing was destroyed; use --force to close anyway.",
+                            task_repo.repo_name
+                        )));
                     } else {
+                        // Dir already gone: the worktree is effectively removed,
+                        // so tolerate the error and keep close idempotent (N4).
                         warnings.push(format!(
-                            "failed to remove worktree for '{}': {e}",
+                            "worktree for '{}' was already gone: {e}",
                             task_repo.repo_name
                         ));
                     }
                 }
+            }
+            // Bare repo missing / repo not registered are not removal failures:
+            // the worktree git metadata is already unusable, so skip and warn.
+            _ => {}
+        }
+    }
+
+    if let Some(ref target) = task.tmux_window {
+        if let Err(e) = crate::tmux::kill_window(target, verbose) {
+            if verbose {
+                eprintln!("Warning: failed to kill tmux window: {e}");
+            }
+        }
+    }
+
+    // Worktrees are now confirmed gone (or force-removed). Clean up the branch +
+    // prune per repo, and account for skip-with-warning arms.
+    for task_repo in &task.repos {
+        let bare_path = all_repos
+            .iter()
+            .find(|r| r.name == task_repo.repo_name)
+            .map(|r| r.path.clone());
+
+        match bare_path {
+            Some(bp) if bp.exists() => {
                 repos_closed.push(task_repo.repo_name.clone());
 
                 // Always clean up the task branch. By default use a safe delete

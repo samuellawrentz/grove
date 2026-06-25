@@ -14,7 +14,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let outer =
         Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).split(f.area());
 
-    let panels = if app.show_notepad {
+    let panels = if app.ui.show_notepad {
         Layout::horizontal([
             Constraint::Percentage(20),
             Constraint::Percentage(50),
@@ -32,19 +32,19 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     draw_tree(f, app, sidebar[0]);
     draw_projects(f, app, sidebar[1]);
     draw_preview(f, app, panels[1]);
-    if app.show_notepad {
+    if app.ui.show_notepad {
         draw_notepad(f, app, panels[2]);
     }
     draw_status_bar(f, app, outer[1]);
 
     // Draw prompt modal overlay on top of everything
-    if let Overlay::Prompt(ref input) = app.overlay {
+    if let Overlay::Prompt(ref input) = app.ui.overlay {
         draw_prompt_modal(f, input);
     }
 }
 
-fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let focused = app.sidebar_focus == SidebarFocus::Tree;
+fn draw_tree(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let focused = app.ui.sidebar_focus == SidebarFocus::Tree;
     let border_color = if focused {
         Color::Cyan
     } else {
@@ -70,47 +70,34 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    let mut row_idx = 0;
+    // Build rendered lines from the compacted, filter-aware display rows so
+    // cursor space and lines space cannot diverge under a search filter. The
+    // highlighted row is the one whose display index equals the cursor's
+    // display index (mapped via the same seam).
+    let rows = app.tree.display_rows();
+    let cursor_display = app.tree.cursor_display_index();
+    let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
 
-    for group in &app.tree.groups {
-        let arrow = if group.expanded { "▼" } else { "▶" };
-        let group_has_matches = group
-            .panes
-            .iter()
-            .any(|p| app.tree.pane_matches(p, &group.name));
-
-        // Skip groups with no matching panes when filtered
-        if !group_has_matches {
-            row_idx += 1;
-            if group.expanded {
-                row_idx += group.panes.len();
+    for (display_idx, row) in rows.iter().enumerate() {
+        let selected = focused && Some(display_idx) == cursor_display;
+        match row.kind {
+            crate::tui::tree::DisplayKind::Group(gi) => {
+                let group = &app.tree.groups[gi];
+                let arrow = if group.expanded { "▼" } else { "▶" };
+                let header_style = if selected {
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::DarkGray)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{arrow} {}", group.name),
+                    header_style,
+                )));
             }
-            continue;
-        }
-
-        let header_style = if focused && row_idx == app.tree.cursor {
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .bg(Color::DarkGray)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{arrow} {}", group.name),
-            header_style,
-        )));
-        row_idx += 1;
-
-        if group.expanded {
-            for pane in &group.panes {
-                let matches = app.tree.pane_matches(pane, &group.name);
-
-                if !matches {
-                    row_idx += 1;
-                    continue;
-                }
-
+            crate::tui::tree::DisplayKind::Pane(gi, pi) => {
+                let pane = &app.tree.groups[gi].panes[pi];
                 let (icon, icon_color) = if pane.forced_other {
                     // User-marked as "other" (automation/script): pin icon.
                     ("󰐃", Color::Magenta)
@@ -139,12 +126,12 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     .unwrap_or(".");
                 let label = format!("  {} [{}]", basename, pane.pane_info.current_command);
 
-                let style = if focused && row_idx == app.tree.cursor {
+                let style = if selected {
                     Style::default().bg(Color::DarkGray)
                 } else {
                     Style::default()
                 };
-                let icon_style = if focused && row_idx == app.tree.cursor {
+                let icon_style = if selected {
                     Style::default().fg(icon_color).bg(Color::DarkGray)
                 } else {
                     Style::default().fg(icon_color)
@@ -153,13 +140,14 @@ fn draw_tree(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     Span::styled(format!("  {icon} "), icon_style),
                     Span::styled(label, style),
                 ]));
-                row_idx += 1;
             }
         }
     }
 
-    // Apply scroll offset
+    // Apply scroll offset in display space, clamped so the cursor stays visible
+    // and the offset never runs past the compacted line set.
     let visible_height = inner.height as usize;
+    app.tree.clamp_scroll(visible_height);
     let start = app.tree.scroll_offset;
     let end = std::cmp::min(start + visible_height, lines.len());
     let visible_lines: Vec<Line> = if start < lines.len() {
@@ -194,7 +182,7 @@ fn format_relative_time(last_seen: &str) -> String {
 }
 
 fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let focused = app.sidebar_focus == SidebarFocus::Projects;
+    let focused = app.ui.sidebar_focus == SidebarFocus::Projects;
     let border_color = if focused {
         Color::Cyan
     } else {
@@ -211,7 +199,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let filtered_indices = app.filtered_project_indices();
 
     if filtered_indices.is_empty() {
-        let msg = if app.projects.is_empty() {
+        let msg = if app.projects.list.is_empty() {
             "No projects yet"
         } else {
             "No matches"
@@ -235,10 +223,10 @@ fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .iter()
         .enumerate()
         .map(|(display_idx, &real_idx)| {
-            let project = &app.projects[real_idx];
-            let is_active = active_paths.contains(&project.path.to_string_lossy().to_string());
+            let project = &app.projects.list[real_idx];
+            let is_active = active_paths.contains(project.path.to_string_lossy().as_ref());
             let time = format_relative_time(&project.last_seen);
-            let selected = focused && display_idx == app.projects_cursor;
+            let selected = focused && display_idx == app.projects.cursor;
             let style = if selected {
                 Style::default().bg(Color::DarkGray)
             } else if is_active {
@@ -260,8 +248,8 @@ fn draw_projects(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
 
     let visible_height = inner.height as usize;
-    let start = if app.projects_cursor >= visible_height {
-        app.projects_cursor - visible_height + 1
+    let start = if app.projects.cursor >= visible_height {
+        app.projects.cursor - visible_height + 1
     } else {
         0
     };
@@ -283,7 +271,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         AgentFilter::AnyAgent => " [agents] ".to_string(),
         AgentFilter::Others => " [others] ".to_string(),
     };
-    let title = if app.diff_mode {
+    let title = if app.preview.diff_mode {
         " Git Diff ".to_string()
     } else if let Some(pane_id) = app.tree.selected_pane_id() {
         format!(" Preview{}-- {pane_id} ", filter_label)
@@ -297,22 +285,23 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .title(title);
 
     let inner = block.inner(area);
-    let text = if app.diff_mode {
-        if let Some(ref ds) = app.diff_state {
+    let text = if app.preview.diff_mode {
+        if let Some(ref ds) = app.preview.diff_state {
             ratatui::text::Text::from(ds.render())
         } else {
             ratatui::text::Text::raw("No diff data")
         }
     } else {
         use ansi_to_tui::IntoText as _;
-        app.preview_content
+        app.preview
+            .content
             .into_text()
-            .unwrap_or_else(|_| ratatui::text::Text::raw(&app.preview_content))
+            .unwrap_or_else(|_| ratatui::text::Text::raw(&app.preview.content))
     };
     let line_count = text.lines.len();
     let visible_height = inner.height as usize;
-    let scroll = if app.diff_mode {
-        if let Some(ref ds) = app.diff_state {
+    let scroll = if app.preview.diff_mode {
+        if let Some(ref ds) = app.preview.diff_state {
             // Keep cursor centered-ish in viewport
             ds.cursor.saturating_sub(visible_height / 2) as u16
         } else {
@@ -324,14 +313,14 @@ fn draw_preview(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         } else {
             0
         };
-        max_scroll.saturating_sub(app.preview_scroll_up)
+        max_scroll.saturating_sub(app.preview.scroll_up)
     };
     let preview = Paragraph::new(text).block(block).scroll((scroll, 0));
     f.render_widget(preview, area);
 }
 
 fn draw_notepad(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let focused = app.focus == Focus::Notepad;
+    let focused = app.ui.focus == Focus::Notepad;
     let project_name = std::path::Path::new(&app.notepad.project)
         .file_name()
         .and_then(|n| n.to_str())
@@ -405,7 +394,7 @@ fn draw_prompt_modal(f: &mut Frame, input: &str) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let content = match app.overlay {
+    let content = match app.ui.overlay {
         Overlay::OpenChoice { .. } => Line::from(vec![
             Span::styled("Open: ", Style::default().fg(Color::Cyan)),
             Span::styled("[c]", Style::default().fg(Color::White)),
@@ -437,18 +426,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 /// The non-overlay status bar content: a transient status message, else the
 /// context-sensitive key hints.
 fn status_or_hint(app: &App) -> Line<'_> {
-    if let Some(ref msg) = app.status_message {
+    if let Some(ref msg) = app.ui.status_message {
         Line::from(Span::styled(
             msg.as_str(),
             Style::default().fg(Color::Yellow),
         ))
     } else {
-        let hint = if app.focus == Focus::Notepad {
+        let hint = if app.ui.focus == Focus::Notepad {
             "\u{270e} Notepad (vim) | m/Esc: unfocus | C-r: hide | v:select Enter:send to pane"
-        } else if app.diff_mode {
+        } else if app.preview.diff_mode {
             "j/k:nav  C-j/k:jump10  w:expand/collapse  d:close diff  q:quit"
         } else {
-            match app.sidebar_focus {
+            match app.ui.sidebar_focus {
                 SidebarFocus::Tree => {
                     "j/k:nav  C-t:filter  /:search  Enter:switch  e:edit  d:diff  C-r:notepad m:focus  C:claude O:opencode X:codex U:cursor  T:term  M:mark-other  a/r:accept/reject  s:send  o:open  q:quit"
                 }

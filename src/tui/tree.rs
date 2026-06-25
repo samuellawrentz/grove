@@ -6,23 +6,80 @@ use super::flat_rows::FlatRows;
 use crate::agent::{detect_agent_in_pane, AgentFilter, AgentInfo, AgentKind, AgentState};
 use crate::tmux::PaneInfo;
 
-static PROJECT_ROOT_CACHE: Mutex<Option<HashMap<PathBuf, PathBuf>>> = Mutex::new(None);
+/// Cap on cached project-root mappings; oldest insertions evicted past this.
+const ROOT_CACHE_CAP: usize = 1024;
 
-fn resolve_project_root(path: &Path) -> PathBuf {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut cache = PROJECT_ROOT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let map = cache.get_or_insert_with(HashMap::new);
-    if let Some(root) = map.get(&canonical) {
-        return root.clone();
+/// Bounded path→project-root cache with insertion-order eviction and a `gc`
+/// that drops entries for paths no longer live.
+#[derive(Default)]
+struct ProjectRootCache {
+    map: HashMap<PathBuf, PathBuf>,
+    order: Vec<PathBuf>,
+}
+
+impl ProjectRootCache {
+    fn get(&self, path: &Path) -> Option<&PathBuf> {
+        self.map.get(path)
     }
-    let git_root = std::process::Command::new("git")
+
+    fn insert(&mut self, key: PathBuf, root: PathBuf) {
+        if self.map.len() >= ROOT_CACHE_CAP && !self.map.contains_key(&key) {
+            if let Some(oldest) = (!self.order.is_empty()).then(|| self.order.remove(0)) {
+                self.map.remove(&oldest);
+            }
+        }
+        if self.map.insert(key.clone(), root).is_none() {
+            self.order.push(key);
+        }
+    }
+
+    /// Drop entries whose key path is not in `live` and enforce capacity.
+    #[allow(dead_code)]
+    fn gc(&mut self, live: &HashSet<PathBuf>) {
+        self.map.retain(|k, _| live.contains(k));
+        self.order.retain(|k| self.map.contains_key(k));
+        while self.map.len() > ROOT_CACHE_CAP {
+            if self.order.is_empty() {
+                break;
+            }
+            let oldest = self.order.remove(0);
+            self.map.remove(&oldest);
+        }
+    }
+}
+
+static PROJECT_ROOT_CACHE: Mutex<Option<ProjectRootCache>> = Mutex::new(None);
+
+/// The real git-toplevel lookup: shells out to `git rev-parse --show-toplevel`.
+/// This is the default root-resolver injected into `build_groups` in production
+/// (seam S-rootresolver); tests substitute a pure closure to drive grouping
+/// without invoking git.
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&canonical)
+        .current_dir(dir)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| PathBuf::from(s.trim()));
+        .map(|s| PathBuf::from(s.trim()))
+}
+
+fn resolve_project_root(path: &Path) -> PathBuf {
+    resolve_project_root_with(path, git_toplevel)
+}
+
+/// Resolve a pane's working directory to its project-root group key, using an
+/// injectable `git_root` lookup. Production passes `git_toplevel`; tests pass a
+/// pure closure so workspace grouping can be exercised without real git.
+fn resolve_project_root_with(path: &Path, git_root: impl Fn(&Path) -> Option<PathBuf>) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut cache = PROJECT_ROOT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = cache.get_or_insert_with(ProjectRootCache::default);
+    if let Some(root) = cache.get(&canonical) {
+        return root.clone();
+    }
+    let git_root = git_root(&canonical);
 
     let root = match git_root {
         Some(ref gr) => {
@@ -39,7 +96,7 @@ fn resolve_project_root(path: &Path) -> PathBuf {
         }
         None => canonical.clone(),
     };
-    map.insert(canonical, root.clone());
+    cache.insert(canonical, root.clone());
     root
 }
 
@@ -75,6 +132,27 @@ pub(crate) struct TreePane {
     pub agent: Option<AgentInfo>,
     /// User-asserted mark forcing this pane into the "others" tab.
     pub forced_other: bool,
+}
+
+/// A single visible (filter-aware, compacted) row in display space.
+///
+/// Display space is the *rendered* row list: group headers that have at least
+/// one matching pane, each followed by their matching pane rows. It is the
+/// space `ui::draw_tree` actually pushes lines into and scrolls. Each row also
+/// carries its absolute `cursor`-space index so the cursor (which lives in the
+/// full, unfiltered row space) can be located within the compacted display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisplayKind {
+    Group(usize),
+    Pane(usize, usize),
+}
+
+/// A compacted, filter-aware visible row plus its absolute cursor-space index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DisplayRow {
+    pub kind: DisplayKind,
+    /// The absolute index in full `cursor` space this row corresponds to.
+    pub cursor_index: usize,
 }
 
 /// State for the tree view: groups, cursor, and scroll.
@@ -130,6 +208,9 @@ impl TreeState {
             .iter()
             .map(|g| (g.name.clone(), g.expanded))
             .collect();
+        // Capture the pane under the cursor so we can re-anchor onto it after
+        // panes re-sort (e.g. a just-active pane floats up on a background tick).
+        let selected_id = self.selected_pane_id().map(str::to_string);
         self.groups = build_groups(
             panes,
             agent_states,
@@ -139,35 +220,60 @@ impl TreeState {
             exclude_pane_id,
             &old_expanded,
         );
-        // Clamp cursor to valid range
-        let count = self.visible_count();
-        if count == 0 {
-            self.cursor = 0;
-        } else if self.cursor >= count {
-            self.cursor = count - 1;
+        // Re-anchor the cursor onto the same pane if it still exists; otherwise
+        // fall back to clamping the numeric cursor into range.
+        if let Some(pos) = selected_id.and_then(|id| self.pane_cursor_position(&id)) {
+            self.cursor = pos;
+        } else {
+            let count = self.visible_count();
+            if count == 0 {
+                self.cursor = 0;
+            } else if self.cursor >= count {
+                self.cursor = count - 1;
+            }
         }
+    }
+
+    /// The single canonical walk: every visible row (group headers + expanded
+    /// pane rows) in order, each tagged with its kind and absolute `cursor`-space
+    /// index. Unfiltered — `display_rows()` derives the filtered view from this.
+    /// All header/expand traversal routes through here (G3: no move math).
+    pub(crate) fn rows(&self) -> Vec<DisplayRow> {
+        let mut rows = Vec::new();
+        let mut pos = 0;
+        for (gi, group) in self.groups.iter().enumerate() {
+            rows.push(DisplayRow {
+                kind: DisplayKind::Group(gi),
+                cursor_index: pos,
+            });
+            pos += 1;
+            if group.expanded {
+                for pi in 0..group.panes.len() {
+                    rows.push(DisplayRow {
+                        kind: DisplayKind::Pane(gi, pi),
+                        cursor_index: pos,
+                    });
+                    pos += 1;
+                }
+            }
+        }
+        rows
+    }
+
+    /// The row under the cursor, if any (header or pane).
+    fn row_at_cursor(&self) -> Option<DisplayRow> {
+        self.rows()
+            .into_iter()
+            .find(|r| r.cursor_index == self.cursor)
     }
 
     /// Get the pane under the cursor, if the cursor is on a pane row (not a group header).
     #[must_use]
     pub fn selected_pane(&self) -> Option<&TreePane> {
-        let mut pos = 0;
-        for group in &self.groups {
-            if pos == self.cursor {
-                // Cursor is on the group header
-                return None;
-            }
-            pos += 1;
-            if group.expanded {
-                for pane in &group.panes {
-                    if pos == self.cursor {
-                        return Some(pane);
-                    }
-                    pos += 1;
-                }
-            }
+        match self.row_at_cursor()?.kind {
+            DisplayKind::Pane(gi, pi) => Some(&self.groups[gi].panes[pi]),
+            DisplayKind::Group(_) => None,
         }
-        None
     }
 
     /// Convenience: get the pane_id of the selected pane.
@@ -193,30 +299,15 @@ impl TreeState {
     /// Toggle expand/collapse for the group under the cursor.
     #[cfg(test)]
     pub fn toggle_expand(&mut self) {
-        let mut pos = 0;
-        for group in &mut self.groups {
-            if pos == self.cursor {
-                group.expanded = !group.expanded;
-                return;
-            }
-            pos += 1;
-            if group.expanded {
-                pos += group.panes.len();
-            }
+        if let Some(DisplayKind::Group(gi)) = self.row_at_cursor().map(|r| r.kind) {
+            self.groups[gi].expanded = !self.groups[gi].expanded;
         }
     }
 
     /// Total number of visible rows (group headers + expanded pane rows).
     #[must_use]
     pub fn visible_count(&self) -> usize {
-        let mut count = 0;
-        for group in &self.groups {
-            count += 1; // group header
-            if group.expanded {
-                count += group.panes.len();
-            }
-        }
-        count
+        self.rows().len()
     }
 
     /// Check if a pane matches the current search and claude filters.
@@ -238,22 +329,76 @@ impl TreeState {
         search_ok && agent_ok
     }
 
-    /// Get positions of all visible pane rows (not group headers), respecting search filter.
-    fn pane_positions(&self) -> Vec<usize> {
-        let mut positions = Vec::new();
-        let mut pos = 0;
-        for group in &self.groups {
-            pos += 1; // group header
-            if group.expanded {
-                for pane in &group.panes {
-                    if self.pane_matches(pane, &group.name) {
-                        positions.push(pos);
-                    }
-                    pos += 1;
+    /// The compacted, filter-aware ordered list of visible rows: group headers
+    /// that have matching panes followed by their matching pane rows. Each row
+    /// carries its absolute `cursor`-space index. This is the single source of
+    /// truth for what `ui::draw_tree` renders and scrolls.
+    pub(crate) fn display_rows(&self) -> Vec<DisplayRow> {
+        // Derive the filtered view from the canonical unfiltered walk: keep
+        // matching pane rows, and headers only when their group has a match.
+        let group_has_match = |gi: usize| {
+            self.groups[gi]
+                .panes
+                .iter()
+                .any(|p| self.pane_matches(p, &self.groups[gi].name))
+        };
+        self.rows()
+            .into_iter()
+            .filter(|r| match r.kind {
+                DisplayKind::Group(gi) => group_has_match(gi),
+                DisplayKind::Pane(gi, pi) => {
+                    self.pane_matches(&self.groups[gi].panes[pi], &self.groups[gi].name)
                 }
+            })
+            .collect()
+    }
+
+    /// The cursor's index within display space, if the cursor sits on a visible
+    /// (matching) row. Hidden/filtered cursor positions yield `None`.
+    pub(crate) fn cursor_display_index(&self) -> Option<usize> {
+        self.display_rows()
+            .iter()
+            .position(|r| r.cursor_index == self.cursor)
+    }
+
+    /// Clamp `scroll_offset` against display space so the offset never exceeds
+    /// the number of display rows and the cursor's display row stays inside the
+    /// visible window `[scroll_offset, scroll_offset + height)`.
+    pub(crate) fn clamp_scroll(&mut self, height: usize) {
+        let rows = self.display_rows();
+        let len = rows.len();
+        if self.scroll_offset > len {
+            self.scroll_offset = len;
+        }
+        if height == 0 {
+            return;
+        }
+        if let Some(idx) = rows.iter().position(|r| r.cursor_index == self.cursor) {
+            if idx < self.scroll_offset {
+                self.scroll_offset = idx;
+            } else if idx >= self.scroll_offset + height {
+                self.scroll_offset = idx + 1 - height;
             }
         }
-        positions
+    }
+
+    /// Find the absolute `cursor`-space position of a pane by its id.
+    fn pane_cursor_position(&self, pane_id: &str) -> Option<usize> {
+        self.rows().into_iter().find_map(|r| match r.kind {
+            DisplayKind::Pane(gi, pi) if self.groups[gi].panes[pi].pane_info.pane_id == pane_id => {
+                Some(r.cursor_index)
+            }
+            _ => None,
+        })
+    }
+
+    /// Get positions of all visible pane rows (not group headers), respecting search filter.
+    fn pane_positions(&self) -> Vec<usize> {
+        self.display_rows()
+            .into_iter()
+            .filter(|r| matches!(r.kind, DisplayKind::Pane(..)))
+            .map(|r| r.cursor_index)
+            .collect()
     }
 
     /// Move cursor to the next or previous pane row, skipping group headers.
@@ -291,35 +436,27 @@ impl TreeState {
 
     /// Find the group index containing the cursor position.
     fn cursor_group_index(&self) -> Option<usize> {
-        let mut pos = 0;
-        for (i, group) in self.groups.iter().enumerate() {
-            if pos == self.cursor {
-                return Some(i);
-            }
-            pos += 1;
-            if group.expanded {
-                for _ in &group.panes {
-                    if pos == self.cursor {
-                        return Some(i);
-                    }
-                    pos += 1;
-                }
-            }
-        }
-        None
+        self.row_at_cursor().map(|r| match r.kind {
+            DisplayKind::Group(gi) | DisplayKind::Pane(gi, _) => gi,
+        })
+    }
+
+    /// Absolute `cursor`-space position of a group's header row.
+    fn group_header_position(&self, group_idx: usize) -> usize {
+        self.rows()
+            .into_iter()
+            .find_map(|r| match r.kind {
+                DisplayKind::Group(gi) if gi == group_idx => Some(r.cursor_index),
+                _ => None,
+            })
+            .unwrap_or(0)
     }
 
     /// Collapse the group containing the cursor, moving cursor to group header.
     pub fn collapse_current_group(&mut self) {
         if let Some(group_idx) = self.cursor_group_index() {
             if self.groups[group_idx].expanded {
-                let mut header_pos = 0;
-                for i in 0..group_idx {
-                    header_pos += 1;
-                    if self.groups[i].expanded {
-                        header_pos += self.groups[i].panes.len();
-                    }
-                }
+                let header_pos = self.group_header_position(group_idx);
                 self.groups[group_idx].expanded = false;
                 self.cursor = header_pos;
             }
@@ -330,17 +467,10 @@ impl TreeState {
     pub fn expand_current_group(&mut self) {
         if let Some(group_idx) = self.cursor_group_index() {
             if !self.groups[group_idx].expanded {
+                let header_pos = self.group_header_position(group_idx);
                 self.groups[group_idx].expanded = true;
-                let mut first_pane_pos = 0;
-                for i in 0..group_idx {
-                    first_pane_pos += 1;
-                    if self.groups[i].expanded {
-                        first_pane_pos += self.groups[i].panes.len();
-                    }
-                }
-                first_pane_pos += 1; // skip this group's header
                 if !self.groups[group_idx].panes.is_empty() {
-                    self.cursor = first_pane_pos;
+                    self.cursor = header_pos + 1; // first pane follows the header
                 }
             }
         }
@@ -348,17 +478,10 @@ impl TreeState {
 
     /// Get the group under the cursor, if the cursor is on a group header.
     pub fn selected_group(&self) -> Option<&TreeGroup> {
-        let mut pos = 0;
-        for group in &self.groups {
-            if pos == self.cursor {
-                return Some(group);
-            }
-            pos += 1;
-            if group.expanded {
-                pos += group.panes.len();
-            }
+        match self.row_at_cursor()?.kind {
+            DisplayKind::Group(gi) => Some(&self.groups[gi]),
+            DisplayKind::Pane(..) => None,
         }
-        None
     }
 
     /// Get the group containing the cursor, whether on a header or a pane row.
@@ -468,6 +591,32 @@ fn build_groups(
     exclude_pane_id: &str,
     old_expanded: &[(String, bool)],
 ) -> Vec<TreeGroup> {
+    build_groups_with_resolver(
+        panes,
+        agent_states,
+        recorded_kinds,
+        marked_other,
+        current_session,
+        exclude_pane_id,
+        old_expanded,
+        resolve_project_root,
+    )
+}
+
+/// `build_groups` with an injectable project-root resolver (seam S-rootresolver).
+/// Production delegates here with `resolve_project_root` (which shells out to
+/// real git); tests pass a pure resolver to drive workspace grouping without git.
+#[allow(clippy::too_many_arguments)]
+fn build_groups_with_resolver(
+    panes: &[PaneInfo],
+    agent_states: &HashMap<String, AgentState>,
+    recorded_kinds: &HashMap<String, AgentKind>,
+    marked_other: &HashSet<String>,
+    current_session: Option<&str>,
+    exclude_pane_id: &str,
+    old_expanded: &[(String, bool)],
+    resolve_root: impl Fn(&Path) -> PathBuf,
+) -> Vec<TreeGroup> {
     // Group panes by parent directory
     let mut group_map: HashMap<PathBuf, Vec<TreePane>> = HashMap::new();
 
@@ -497,7 +646,7 @@ fn build_groups(
             forced_other,
         };
 
-        let project_root = resolve_project_root(&pane.current_path);
+        let project_root = resolve_root(&pane.current_path);
         group_map.entry(project_root).or_default().push(tree_pane);
     }
 
@@ -584,6 +733,22 @@ mod tests {
 
     fn make_pane(id: &str, session: &str, win_idx: u32, path: &str, cmd: &str) -> PaneInfo {
         make_pane_win(id, session, win_idx, &format!("win-{win_idx}"), path, cmd)
+    }
+
+    #[test]
+    fn cache_evicts_dead_and_bounds() {
+        let mut cache = ProjectRootCache::default();
+        for i in 0..(ROOT_CACHE_CAP + 10) {
+            cache.insert(PathBuf::from(format!("/p/{i}")), PathBuf::from("/root"));
+        }
+        assert!(cache.map.len() <= ROOT_CACHE_CAP);
+
+        let keep = ROOT_CACHE_CAP + 5; // a surviving (recent) entry
+        let live: HashSet<PathBuf> = [PathBuf::from(format!("/p/{keep}"))].into_iter().collect();
+        cache.gc(&live);
+        assert!(cache.map.contains_key(&PathBuf::from(format!("/p/{keep}"))));
+        assert!(!cache.map.contains_key(Path::new("/p/0")));
+        assert!(cache.map.len() <= live.len());
     }
 
     fn make_pane_win(
@@ -1059,5 +1224,292 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── S7: scroll/cursor desync under search (seam S-displayrows) ──────────
+
+    /// SCROLL-deep-cursor-filtered-not-blank: group A with many panes + group B
+    /// with a matching pane at a deep absolute row. Search matches only the B
+    /// pane; cursor on that match. After clamp_scroll the match's display index
+    /// must be inside the visible window and scroll <= display_rows().len().
+    #[test]
+    fn scroll_deep_cursor_filtered_not_blank() {
+        let mut panes = Vec::new();
+        for i in 0..30 {
+            panes.push(make_pane(&format!("%a{i}"), "main", i, "/opt/aaa", "zsh"));
+        }
+        // Distinctive command only on the B pane so the filter isolates it.
+        panes.push(make_pane("%bmatch", "work", 0, "/opt/bbb", "neovimxyz"));
+        let states = HashMap::new();
+        let mut tree = TreeState::build(&panes, &states, "");
+        tree.search_filter = Some("neovimxyz".to_string());
+
+        // Put the cursor on the matching pane via its absolute position.
+        let match_cursor = tree.pane_cursor_position("%bmatch").unwrap();
+        tree.cursor = match_cursor;
+        // Adversarial: a stale deep offset (cursor-space) that a no-op clamp
+        // would leave blank past the compacted display.
+        tree.scroll_offset = match_cursor;
+
+        let height = 10;
+        tree.clamp_scroll(height);
+
+        let rows = tree.display_rows();
+        let match_idx = tree.cursor_display_index().expect("cursor maps to a row");
+        let start = tree.scroll_offset;
+        assert!(
+            start <= rows.len(),
+            "scroll {start} past rows {}",
+            rows.len()
+        );
+        assert!(
+            start <= match_idx && match_idx < start + height,
+            "match display idx {match_idx} not in window [{start}, {})",
+            start + height
+        );
+    }
+
+    /// SCROLL-invariant-pin (property): for several (filter, expand mask, cursor)
+    /// combinations, after clamp_scroll the offset never exceeds display rows and
+    /// the cursor maps to a real display row (or there are zero display rows).
+    /// Expressed purely via the public seam so it survives the S17 refactor.
+    #[test]
+    fn scroll_invariant_pin() {
+        let filters = [None, Some("zsh".to_string()), Some("nomatchqz".to_string())];
+        for filter in filters {
+            let mut tree = three_group_tree();
+            tree.search_filter = filter.clone();
+            let n = tree.groups.len();
+            for mask in 0..(1u32 << n) {
+                for (i, group) in tree.groups.iter_mut().enumerate() {
+                    group.expanded = (mask >> i) & 1 == 1;
+                }
+                let total = tree.visible_count();
+                for cursor in 0..=total {
+                    tree.cursor = cursor;
+                    tree.scroll_offset = cursor; // adversarial starting offset
+                    for height in [0usize, 1, 5] {
+                        tree.clamp_scroll(height);
+                        let rows = tree.display_rows();
+                        assert!(
+                            tree.scroll_offset <= rows.len(),
+                            "offset {} past rows {} (filter {:?}, mask {mask}, cursor {cursor}, h {height})",
+                            tree.scroll_offset,
+                            rows.len(),
+                            filter
+                        );
+                        if let Some(idx) = tree.cursor_display_index() {
+                            assert!(idx < rows.len(), "cursor display idx out of range");
+                        } else {
+                            // cursor not on a visible row is acceptable; nothing to pin.
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── S17: one canonical row iterator equivalence ─────────────────────────
+
+    /// ROWS-iterator-equiv-old-walks (P1 / S17): the rows()-based walks
+    /// (visible_count, selected_pane_id, selected_group, pane_positions) must
+    /// agree with an independent inline oracle for every cursor across every
+    /// expand mask, both unfiltered and under a search filter. Pins that rows()
+    /// is the single source of traversal truth.
+    #[test]
+    fn rows_iterator_equiv_old_walks() {
+        let filters = [None, Some("zsh".to_string()), Some("nomatchqz".to_string())];
+        for filter in filters {
+            let mut tree = three_group_tree();
+            tree.search_filter = filter.clone();
+            let n = tree.groups.len();
+            for mask in 0..(1u32 << n) {
+                for (i, group) in tree.groups.iter_mut().enumerate() {
+                    group.expanded = (mask >> i) & 1 == 1;
+                }
+
+                // Oracle: rebuild the unfiltered flat walk inline. Each entry:
+                // (group_idx, Option<pane_idx>) — None pane_idx means header.
+                let mut oracle: Vec<(usize, Option<usize>)> = Vec::new();
+                for (gi, group) in tree.groups.iter().enumerate() {
+                    oracle.push((gi, None));
+                    if group.expanded {
+                        for pi in 0..group.panes.len() {
+                            oracle.push((gi, Some(pi)));
+                        }
+                    }
+                }
+
+                // visible_count == unfiltered row count.
+                assert_eq!(
+                    tree.visible_count(),
+                    oracle.len(),
+                    "visible_count, mask {mask}"
+                );
+
+                // pane_positions: absolute indices of matching pane rows.
+                let expected_positions: Vec<usize> = oracle
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, (gi, pi))| {
+                        let pi = (*pi)?;
+                        let g = &tree.groups[*gi];
+                        tree.pane_matches(&g.panes[pi], &g.name).then_some(idx)
+                    })
+                    .collect();
+                assert_eq!(
+                    tree.pane_positions(),
+                    expected_positions,
+                    "pane_positions, filter {filter:?}, mask {mask}"
+                );
+
+                // Per-cursor: selected_pane_id and selected_group.
+                for (c, (gi, pi)) in oracle.iter().enumerate() {
+                    tree.cursor = c;
+                    let exp_pane =
+                        pi.map(|pi| tree.groups[*gi].panes[pi].pane_info.pane_id.clone());
+                    assert_eq!(
+                        tree.selected_pane_id().map(str::to_string),
+                        exp_pane,
+                        "selected_pane_id cursor {c}, mask {mask}"
+                    );
+                    let exp_group = pi.is_none().then(|| tree.groups[*gi].name.clone());
+                    assert_eq!(
+                        tree.selected_group().map(|g| g.name.clone()),
+                        exp_group,
+                        "selected_group cursor {c}, mask {mask}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── S8: selection preserved across rebuild reorder ──────────────────────
+
+    /// REBUILD-keeps-selected-across-reorder: select pane X, then rebuild with an
+    /// agent_states change that floats another pane above X. The selection must
+    /// stay on X even though its absolute row moved.
+    #[test]
+    fn rebuild_keeps_selected_across_reorder() {
+        let panes = vec![
+            pane_with_activity("%x", "main", "/opt/x", "claude", 100),
+            pane_with_activity("%y", "main", "/opt/x", "claude", 50),
+        ];
+        let mut states = HashMap::new();
+        states.insert("%x".to_string(), AgentState::Active);
+        states.insert("%y".to_string(), AgentState::Active);
+        let mut tree = TreeState::build(&panes, &states, "");
+
+        // Select pane %x (initially first pane: header at 0, %x at 1).
+        tree.cursor = tree.pane_cursor_position("%x").unwrap();
+        assert_eq!(tree.selected_pane_id(), Some("%x"));
+
+        // Rebuild: %y now needs attention (Idle) so it floats above %x.
+        states.insert("%y".to_string(), AgentState::Idle);
+        tree.rebuild(
+            &panes,
+            &states,
+            &HashMap::new(),
+            &HashSet::new(),
+            Some("main"),
+            "",
+        );
+
+        // Order changed (%y floated up) but selection must still be %x.
+        assert_eq!(tree.groups[0].panes[0].pane_info.pane_id, "%y");
+        assert_eq!(tree.selected_pane_id(), Some("%x"));
+    }
+
+    // ── S22 / seam S-rootresolver: workspace detection + grouping ───────────
+
+    /// Make `dir/<name>/.git` so `name` looks like a git repo child.
+    fn make_git_child(dir: &Path, name: &str) {
+        let child = dir.join(name);
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".git"), "gitdir: x").unwrap();
+    }
+
+    /// WORKSPACE-2plus-children-true: 2+ child dirs each with a `.git` => true.
+    #[test]
+    fn workspace_2plus_children_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_git_child(tmp.path(), "repo-a");
+        make_git_child(tmp.path(), "repo-b");
+        assert!(is_workspace(tmp.path()));
+    }
+
+    /// WORKSPACE-one-child-false: only 1 child with .git => false.
+    #[test]
+    fn workspace_one_child_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_git_child(tmp.path(), "repo-a");
+        assert!(!is_workspace(tmp.path()));
+    }
+
+    /// WORKSPACE-own-git-false: dir that itself has .git => false even with
+    /// git children.
+    #[test]
+    fn workspace_own_git_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".git"), "gitdir: x").unwrap();
+        make_git_child(tmp.path(), "repo-a");
+        make_git_child(tmp.path(), "repo-b");
+        assert!(!is_workspace(tmp.path()));
+    }
+
+    /// WORKSPACE-unreadable-false: nonexistent dir => false.
+    #[test]
+    fn workspace_unreadable_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(!is_workspace(&missing));
+    }
+
+    /// WORKSPACE-siblings-collapse-one-group: two panes whose paths resolve (via
+    /// the injected resolver) to sibling repos under a common workspace parent
+    /// collapse into ONE group rooted at the workspace. Drives the seam without
+    /// invoking real git.
+    #[test]
+    fn workspace_siblings_collapse_one_group() {
+        // Real tempdir workspace with two git-child repos so is_workspace(parent)
+        // returns true; the injected resolver maps each pane to its sibling repo.
+        let tmp = tempfile::tempdir().unwrap();
+        make_git_child(tmp.path(), "repo-a");
+        make_git_child(tmp.path(), "repo-b");
+        let ws = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo_a = ws.join("repo-a");
+        let repo_b = ws.join("repo-b");
+
+        let panes = vec![
+            make_pane("%1", "main", 0, repo_a.to_str().unwrap(), "claude"),
+            make_pane("%2", "work", 0, repo_b.to_str().unwrap(), "claude"),
+        ];
+        let states = HashMap::new();
+        let recorded = HashMap::new();
+
+        // Injected resolver: mimic resolve_project_root's climb — each repo's
+        // git root's parent is the workspace, so both collapse to `ws`.
+        let resolver = |p: &Path| {
+            let git_root = p.to_path_buf();
+            match git_root.parent() {
+                Some(parent) if is_workspace(parent) => parent.to_path_buf(),
+                _ => git_root,
+            }
+        };
+
+        let groups = build_groups_with_resolver(
+            &panes,
+            &states,
+            &recorded,
+            &HashSet::new(),
+            None,
+            "",
+            &[],
+            resolver,
+        );
+
+        assert_eq!(groups.len(), 1, "siblings must collapse into one group");
+        assert_eq!(groups[0].path, ws, "group rooted at the workspace parent");
+        assert_eq!(groups[0].panes.len(), 2);
     }
 }

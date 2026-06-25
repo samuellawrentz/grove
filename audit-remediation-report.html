@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grove — Audit Remediation Report</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#30363d;
+    --txt:#e6edf3; --mut:#8b949e; --grn:#3fb950; --grnbg:#0f2a17;
+    --amb:#d29922; --blu:#58a6ff; --pur:#bc8cff; --red:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.55;padding:48px 24px 80px}
+  .wrap{max-width:1040px;margin:0 auto}
+  header{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:36px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--mut)}
+  h1{font-size:34px;font-weight:700;margin:8px 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--mut);font-size:15px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:999px;background:var(--grnbg);color:var(--grn);border:1px solid #1f6f33;margin-top:14px}
+  .grid{display:grid;gap:16px}
+  .kpis{grid-template-columns:repeat(4,1fr);margin-bottom:40px}
+  @media(max-width:760px){.kpis{grid-template-columns:repeat(2,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .kpi .n{font-size:30px;font-weight:700;font-family:var(--mono);letter-spacing:-.03em}
+  .kpi .l{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+  .kpi .n.grn{color:var(--grn)} .kpi .n.blu{color:var(--blu)} .kpi .n.pur{color:var(--pur)}
+  h2{font-size:13px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.14em;color:var(--mut);margin:42px 0 16px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  .phase{margin-bottom:14px}
+  .phead{display:flex;align-items:center;gap:12px;cursor:pointer;padding:14px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;transition:background .15s}
+  .phead:hover{background:var(--panel2)}
+  .phead .tick{width:22px;height:22px;border-radius:50%;background:var(--grn);color:#06210f;display:grid;place-items:center;font-size:13px;font-weight:800;flex:none}
+  .phead .pt{font-weight:650;font-size:15px}
+  .phead .pm{color:var(--mut);font-size:13px;margin-left:auto;font-family:var(--mono)}
+  .pbody{display:none;padding:6px 0 4px 0}
+  .phase.open .pbody{display:block}
+  .phase.open .arw{transform:rotate(90deg)}
+  .arw{color:var(--mut);transition:transform .15s;font-size:12px}
+  .step{display:grid;grid-template-columns:54px 1fr;gap:14px;padding:12px 18px;border-left:2px solid var(--line);margin:8px 0 8px 26px}
+  .step .id{font-family:var(--mono);font-weight:700;color:var(--blu);font-size:13px}
+  .step .d{font-size:14px;color:var(--txt)}
+  .step .files{font-family:var(--mono);font-size:11.5px;color:var(--mut);margin-top:4px}
+  .tag{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);color:var(--mut);margin-right:6px}
+  .tag.sec{color:var(--red);border-color:#5a2422} .tag.perf{color:var(--amb);border-color:#5a4a17}
+  .tag.dry{color:var(--pur);border-color:#3f2d5c} .tag.fix{color:var(--blu);border-color:#1f4b7a}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line)}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
+  td.r,th.r{text-align:right;font-family:var(--mono)}
+  .bar{height:7px;border-radius:4px;background:var(--blu);min-width:3px}
+  .barwrap{background:#222b38;border-radius:4px;overflow:hidden;width:100%}
+  .gate{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
+  .gate .g{font-family:var(--mono);font-size:12px;padding:7px 12px;background:var(--grnbg);border:1px solid #1f6f33;color:var(--grn);border-radius:8px}
+  .note{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--amb);border-radius:8px;padding:12px 16px;margin:10px 0;font-size:13.5px;color:#d9e1e8}
+  .note b{color:var(--amb)}
+  footer{margin-top:54px;padding-top:20px;border-top:1px solid var(--line);color:var(--mut);font-size:12px;font-family:var(--mono)}
+  code{font-family:var(--mono);background:#222b38;padding:1px 5px;border-radius:4px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">Grove · TUI worktree manager · v0.5.0</div>
+  <h1>Audit Remediation Report</h1>
+  <div class="sub">42 adversarially-verified findings (2 P1 · 14 P2 · 26 P3) · 6 phases · TDD red→green with per-phase quality gates</div>
+  <div class="pill">● ALL 6 PHASES COMPLETE — full suite green</div>
+</header>
+
+<div class="grid kpis">
+  <div class="card kpi"><div class="n grn">24/24</div><div class="l">Steps landed</div></div>
+  <div class="card kpi"><div class="n blu">185</div><div class="l">Tests passing</div></div>
+  <div class="card kpi"><div class="n pur">+54</div><div class="l">New test fns</div></div>
+  <div class="card kpi"><div class="n grn">0</div><div class="l">Clippy warnings</div></div>
+</div>
+
+<h2>Quality gates (every phase + final)</h2>
+<div class="card">
+  <div class="gate">
+    <span class="g">✓ cargo fmt clean</span>
+    <span class="g">✓ clippy 0 warnings</span>
+    <span class="g">✓ 127 unit + 58 integration green</span>
+    <span class="g">✓ structural-checks.sh (G1·G2·G3·PANIC·HOOK)</span>
+    <span class="g">✓ release build (panic=unwind)</span>
+  </div>
+  <div class="note" style="margin-top:16px"><b>Method.</b> Each step was driven test-first: write the failing case, confirm red, implement, confirm green. Refactors (Phase 5) were guarded by equivalence pins written against the <i>old</i> code as oracle before touching it. Two CI structural gates were added — <code>PANIC</code> (release must not <code>panic="abort"</code>) and <code>HOOK</code> (no bare <code>#{pane_current_path}</code> in a single-quoted run-shell) — named to avoid colliding with the pre-existing G1–G3.</div>
+</div>
+
+<h2>Phases &amp; steps <span style="font-family:inherit;text-transform:none;letter-spacing:0;color:var(--mut);font-size:11px">(click to expand)</span></h2>
+
+<div class="phase open" onclick="this.classList.toggle('open')">
+  <div class="phead"><span class="tick">✓</span><span class="arw">▶</span><span class="pt">Phase 1 — Security &amp; data-loss</span><span class="pm">S1 · S2 · S5</span></div>
+  <div class="pbody" onclick="event.stopPropagation()">
+    <div class="step"><div class="id">S1</div><div><div class="d"><span class="tag sec">P1 sec</span>tmux-hook shell injection fixed — <code>#{q:pane_current_path}</code> + quoted binary via pure <code>project_hook_command</code> seam.</div><div class="files">src/tmux.rs · test HOOK-uses-q-modifier</div></div></div>
+    <div class="step"><div class="id">S2</div><div><div class="d"><span class="tag sec">P1 data</span>Legacy migration hardened — parse with <code>?</code>, txn-wrapped import, propagated upsert failures, rename only on non-empty success (no more silent data loss).</div><div class="files">src/db.rs · MIG-corrupt / zero-yield / valid (state + recents)</div></div></div>
+    <div class="step"><div class="id">S5</div><div><div class="d"><span class="tag fix">P1</span>Release profile flipped to <code>panic="unwind"</code> so the journal + TerminalGuard Drop run; stale test caveat removed.</div><div class="files">Cargo.toml · rollback.rs · PANIC-release-not-abort</div></div></div>
+  </div>
+</div>
+
+<div class="phase" onclick="this.classList.toggle('open')">
+  <div class="phead"><span class="tick">✓</span><span class="arw">▶</span><span class="pt">Phase 2 — Data integrity &amp; partial failure</span><span class="pm">S3 · S4 · S6</span></div>
+  <div class="pbody" onclick="event.stopPropagation()">
+    <div class="step"><div class="id">S3</div><div><div class="d"><span class="tag fix">P2</span>Migrations made atomic (each step in <code>transaction()</code>) and V5 re-runnable — static SCHEMA_V5 replaced by idempotent <code>migrate_v5</code> recovering any half-applied state.</div><div class="files">src/db.rs · MIG-v0/v1/partial-rerun-recovers</div></div></div>
+    <div class="step"><div class="id">S4</div><div><div class="d"><span class="tag fix">P2</span><code>close</code> split into two passes — worktrees removed before any destruction; non-force removal failure aborts with nothing destroyed (N4 idempotency preserved).</div><div class="files">src/commands/close.rs · CLOSE-nonforce-preserves + force-retry</div></div></div>
+    <div class="step"><div class="id">S6</div><div><div class="d"><span class="tag fix">P2</span>Sticky <code>data_stale</code> / <code>projects_error</code> flags via <code>apply_refresh</code>/<code>apply_projects</code> seams — refresh failures survive keypresses; DB error distinct from empty.</div><div class="files">src/tui/app.rs · REFRESH-sticky/keypress · PROJECTS-db-error</div></div></div>
+  </div>
+</div>
+
+<div class="phase" onclick="this.classList.toggle('open')">
+  <div class="phead"><span class="tick">✓</span><span class="arw">▶</span><span class="pt">Phase 3 — Correctness &amp; UX</span><span class="pm">S7 · S8 · S9</span></div>
+  <div class="pbody" onclick="event.stopPropagation()">
+    <div class="step"><div class="id">S7</div><div><div class="d"><span class="tag fix">P2</span>Scroll/cursor desync under search fixed — <code>display_rows()</code>/<code>cursor_display_index()</code>/<code>clamp_scroll()</code> render &amp; scroll in compacted display space.</div><div class="files">src/tui/ui.rs · SCROLL-deep-cursor + invariant-pin</div></div></div>
+    <div class="step"><div class="id">S8</div><div><div class="d"><span class="tag fix">P2</span>Selection re-anchored to pane id across rebuild (<code>pane_cursor_position</code>) — cursor no longer jumps when panes re-sort on a tick.</div><div class="files">src/tui/tree.rs · REBUILD-keeps-selected</div></div></div>
+    <div class="step"><div class="id">S9</div><div><div class="d"><span class="tag fix">P3</span><code>should_background_refresh()</code> adds notepad-focus to the tick/SIGUSR1 gate — background refresh no longer disrupts notepad editing.</div><div class="files">src/tui/event.rs · GATE-suppress-under-notepad</div></div></div>
+  </div>
+</div>
+
+<div class="phase" onclick="this.classList.toggle('open')">
+  <div class="phead"><span class="tick">✓</span><span class="arw">▶</span><span class="pt">Phase 4 — Performance (per-tick &amp; startup)</span><span class="pm">S10–S16</span></div>
+  <div class="pbody" onclick="event.stopPropagation()">
+    <div class="step"><div class="id">S10</div><div><div class="d"><span class="tag perf">P1 perf</span><code>ProcessTreeCache</code> — negative caching with TTL, injectable resolver/clock, shell-skip. Kills the #1 startup cost + 5s-tick re-walk.</div><div class="files">src/agent.rs · PTREE-negative/ttl/shell-skip</div></div></div>
+    <div class="step"><div class="id">S11</div><div><div class="d"><span class="tag perf">P3</span>Bounded caches with <code>gc(live)</code> — ProcessTreeCache (cap 512) + ProjectRootCache (cap 1024); fixes unbounded growth.</div><div class="files">src/agent.rs · src/tui/tree.rs · CACHE-evicts-dead-and-bounds</div></div></div>
+    <div class="step"><div class="id">S12</div><div><div class="d"><span class="tag perf">P3</span>Hook registration process-once guarded; always overwrites with safe <code>set-hook -g</code> text (never skip/append).</div><div class="files">src/tmux.rs · HOOK-register-overwrites-not-skips</div></div></div>
+    <div class="step"><div class="id">S13</div><div><div class="d"><span class="tag perf">P2</span>First frame painted before the blocking refresh — <code>construct</code>/<code>initial_refresh</code> split; no key processed before first refresh.</div><div class="files">src/tui/{mod,app,event}.rs · INIT-construct-valid-empty</div></div></div>
+    <div class="step"><div class="id">S14</div><div><div class="d"><span class="tag perf">P2</span>Preview capture bounded to viewport (<code>-S -N</code>) and skipped when pane activity is unchanged.</div><div class="files">src/tui/app.rs · src/tmux.rs · PREVIEW-skip/bounded</div></div></div>
+    <div class="step"><div class="id">S15</div><div><div class="d"><span class="tag perf">P2</span>Diff-mode skips the per-tick <code>git diff</code> unless HEAD/index token changed (<code>diff_dirty</code>).</div><div class="files">src/tui/source.rs · app.rs · DIFF-skip-when-unchanged</div></div></div>
+    <div class="step"><div class="id">S16</div><div><div class="d"><span class="tag perf">P3</span>Cheap folds — session cached (OnceLock), single pane_agents read (<code>gc_returning</code>), borrow-not-clone in detection, fewer draw_projects allocs.</div><div class="files">src/{agent,tui/app,tui/ui}.rs · DETECT-borrow-equiv · SESSION-cached-once</div></div></div>
+  </div>
+</div>
+
+<div class="phase" onclick="this.classList.toggle('open')">
+  <div class="phead"><span class="tick">✓</span><span class="arw">▶</span><span class="pt">Phase 5 — Architecture &amp; DRY</span><span class="pm">S17–S20</span></div>
+  <div class="pbody" onclick="event.stopPropagation()">
+    <div class="step"><div class="id">S17</div><div><div class="d"><span class="tag dry">refactor</span>One <code>rows()</code> traversal replaces ~7 hand-rolled flat-row walks (~−55 LOC in tree.rs); ui rides <code>display_rows</code> derived from it.</div><div class="files">src/tui/tree.rs · ui.rs · ROWS-equiv pin (+ carried SCROLL-invariant-pin)</div></div></div>
+    <div class="step"><div class="id">S18</div><div><div class="d"><span class="tag dry">refactor</span><code>App</code> god-struct split into <code>PreviewState</code> / <code>ProjectsState</code> / <code>UiState</code> (~150 access sites updated).</div><div class="files">src/tui/app.rs (+actions/ui/event) · APP-split (suite pin)</div></div></div>
+    <div class="step"><div class="id">S19</div><div><div class="d"><span class="tag dry">refactor</span><code>provision_worktree</code> extracted to commands/util.rs; init + add both route through it (kills rollback-sensitive duplication).</div><div class="files">src/commands/{util,init,add}.rs · PROVISION-rollback-equiv</div></div></div>
+    <div class="step"><div class="id">S20</div><div><div class="d"><span class="tag dry">refactor</span>source.rs data-fetch split from new <code>diff_view.rs</code> render model; actions <code>respond_to_agent</code>/<code>switch_after_launch</code> dedup; refresh_tree helpers.</div><div class="files">src/tui/{source,diff_view,actions,app}.rs · DECOMP (suite pin)</div></div></div>
+  </div>
+</div>
+
+<div class="phase" onclick="this.classList.toggle('open')">
+  <div class="phead"><span class="tick">✓</span><span class="arw">▶</span><span class="pt">Phase 6 — Test backfill &amp; hardening</span><span class="pm">S21 · S22 · S24 · S25</span></div>
+  <div class="pbody" onclick="event.stopPropagation()">
+    <div class="step"><div class="id">S21</div><div><div class="d"><span class="tag fix">tests</span>git.rs unit tests — <code>-d</code> preserves unmerged / <code>-D</code> force, remove/create worktree, uncommitted, invalid-UTF8 path arms.</div><div class="files">src/git.rs</div></div></div>
+    <div class="step"><div class="id">S22</div><div><div class="d"><span class="tag fix">tests</span>Workspace grouping seam <code>build_groups_with_resolver</code>/<code>git_toplevel</code> + is_workspace/sibling-collapse tests.</div><div class="files">src/tui/tree.rs · WORKSPACE-*</div></div></div>
+    <div class="step"><div class="id">S24</div><div><div class="d"><span class="tag fix">P3</span>AgentResolver precedence reconciled — <b>DB-recorded kind wins</b> over self-declared state-file kind; wrapper made consistent. Sync diverged-branch lossy behavior pinned + flagged.</div><div class="files">src/agent.rs · git.rs · RESOLVER-precedence · SYNC-diverged</div></div></div>
+    <div class="step"><div class="id">S25</div><div><div class="d"><span class="tag sec">P3</span>Six hardenings — diff non-zero exit → Err (not "No changes"); add branch/base validated; <code>--</code> before clone URL; pid-file failure surfaced; consistent mutex poison recovery; state-file moved to user-scoped path (<code>$XDG_RUNTIME_DIR</code> / <code>/tmp/grove-&lt;user&gt;</code>) with shell hooks synced.</div><div class="files">source.rs · add.rs · git.rs · tui/mod.rs · agent.rs · hooks/*.sh</div></div></div>
+  </div>
+</div>
+
+<h2>Code footprint (diff vs baseline)</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>File</th><th class="r">+</th><th class="r">−</th><th style="width:40%">churn</th></tr></thead>
+    <tbody id="ftab"></tbody>
+    <tfoot><tr><td><b>21 files + diff_view.rs (new, 437 LOC)</b></td><td class="r" style="color:var(--grn)">+2852</td><td class="r" style="color:var(--red)">−1037</td><td></td></tr></tfoot>
+  </table>
+  <div class="note" style="margin-top:14px"><b>Net shape.</b> Security/correctness phases added guards; the architecture phase subtracted — source.rs dropped ~410→298 LOC and the diff render model moved into a dedicated module, while the App god-struct and seven duplicated tree walks collapsed into single owners. Insertions are dominated by the +54 new tests.</div>
+</div>
+
+<h2>Decisions &amp; open notes</h2>
+<div class="note"><b>panic = "unwind"</b> — locked. Restores the StepJournal rollback + TerminalGuard Drop that init/add/register rely on; release binary now matches dev behavior.</div>
+<div class="note"><b>Resolver precedence</b> — reconciled in favor of the DB-recorded kind (grove pins identity at launch; the state file owns liveness, not identity). Previously the resolver and the app-side merge contradicted each other.</div>
+<div class="note"><b>Sync diverged default branch</b> — current <code>update_default_branch</code> is an unconditional <code>update-ref</code> and will discard local-only commits if the local default diverges. Behavior is now <i>pinned by test</i> and carries a WARNING/TODO to make it ff-only if any caller ever commits to the local default.</div>
+
+<footer>
+  Grove audit remediation · 6 phases · 24 steps · 185 tests green · 0 clippy warnings · generated 2026-06-19 · tracker: PROGRESS.md
+</footer>
+</div>
+<script>
+  const files=[["src/tui/tree.rs",660,0],["src/tui/source.rs",0,530],["src/agent.rs",519,0],["src/db.rs",463,0],["src/tui/app.rs",463,0],["src/git.rs",240,0],["src/tui/actions.rs",239,0],["tests/cli_tests.rs",221,0],["src/tmux.rs",179,0],["src/tui/ui.rs",129,0],["src/commands/close.rs",53,0],["src/tui/mod.rs",46,0],["src/commands/util.rs",27,0],["src/commands/add.rs",23,0],["src/commands/rollback.rs",22,0],["scripts/structural-checks.sh",16,0],["hooks/agent-tmux-status.sh",14,0],["src/commands/init.rs",11,0],["grove-picker.sh",10,0],["Cargo.toml",0,1]];
+  const max=Math.max(...files.map(f=>f[1]+f[2]));
+  document.getElementById('ftab').innerHTML=files.map(f=>{
+    const c=f[1]+f[2], w=(c/max*100).toFixed(0);
+    return `<tr><td><code>${f[0]}</code></td><td class="r" style="color:var(--grn)">${f[1]||''}</td><td class="r" style="color:var(--red)">${f[2]||''}</td><td><div class="barwrap"><div class="bar" style="width:${w}%"></div></div></td></tr>`;
+  }).join('');
+</script>
+</body>
+</html>

@@ -166,8 +166,9 @@ mod tests {
         assert!(log.borrow().is_empty());
     }
 
-    /// SJ-undo-runs-on-panic-unwind (P2): undos run during panic unwinding too
-    /// (holds under panic=unwind; undo failures stay best-effort/log-only).
+    /// SJ-undo-runs-on-panic-unwind (P2): undos run during panic unwinding too.
+    /// The release profile uses panic=unwind, so this holds for the release
+    /// binary as well (undo failures stay best-effort/log-only).
     #[test]
     fn undo_runs_on_panic_unwind() {
         let log: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
@@ -182,5 +183,22 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(*log.borrow(), vec![2, 1]);
+    }
+
+    /// PANIC-release-not-abort: the release profile must unwind (not abort) so
+    /// the drop-based undo above also runs in the release binary. Guard against
+    /// a regression that reintroduces `panic = "abort"`.
+    #[test]
+    fn release_profile_does_not_abort() {
+        let cargo_toml = include_str!("../../Cargo.toml");
+        let release = cargo_toml
+            .split("[profile.release]")
+            .nth(1)
+            .expect("Cargo.toml has a [profile.release] section");
+        let release = release.split("\n[").next().unwrap();
+        assert!(
+            !release.contains("panic = \"abort\""),
+            "release profile must not set panic = \"abort\""
+        );
     }
 }

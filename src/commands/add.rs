@@ -2,7 +2,6 @@ use crate::commands::rollback::StepJournal;
 use crate::commands::Ctx;
 use crate::db::TaskRepo;
 use crate::error::GroveError;
-use crate::git;
 use crate::output;
 use crate::validation::validate_identifier;
 
@@ -18,6 +17,12 @@ pub fn run(
     let verbose = ctx.verbose;
 
     validate_identifier(repo_name, "repo")?;
+    if let Some(b) = branch {
+        validate_identifier(b, "branch")?;
+    }
+    if let Some(b) = base {
+        validate_identifier(b, "base")?;
+    }
 
     let mut task = db
         .get_task(task_id)?
@@ -45,23 +50,17 @@ pub fn run(
         .map(String::from)
         .unwrap_or_else(|| repo_entry.default_branch.clone());
 
-    let created_branch = !git::branch_exists(&bare_path, &branch_name, verbose);
-    git::create_worktree(
+    // Journal the worktree (B2: add had zero rollback); the DB write goes last
+    // inside a terminal tx so a failure rolls back and the journal unwinds.
+    let mut journal = StepJournal::new(verbose);
+    crate::commands::util::provision_worktree(
+        &mut journal,
         &bare_path,
         &worktree_path,
         &branch_name,
         &base_branch,
         verbose,
     )?;
-
-    // Journal the worktree (B2: add had zero rollback); the DB write goes last
-    // inside a terminal tx so a failure rolls back and the journal unwinds.
-    let mut journal = StepJournal::new(verbose);
-    journal.worktree(
-        &bare_path,
-        &worktree_path,
-        created_branch.then_some(branch_name.as_str()),
-    );
 
     task.repos.push(TaskRepo {
         repo_name: repo_name.to_string(),
