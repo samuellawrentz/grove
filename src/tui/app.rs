@@ -167,7 +167,13 @@ impl App {
     /// The first blocking refresh, run after the initial frame is drawn.
     pub(crate) fn initial_refresh(&mut self) {
         self.refresh_tree();
-        self.tree.jump_first_pane();
+        // In a popup, my_pane_id is the originating pane — a real pane the user
+        // launched from; default the cursor onto it. Otherwise fall back to the
+        // first pane (and in non-popup mode it's excluded entirely anyway).
+        let my = self.my_pane_id.clone();
+        if !(self.popup && self.tree.jump_to_pane(&my)) {
+            self.tree.jump_first_pane();
+        }
         self.refresh_preview();
         self.sync_note_to_group();
     }
@@ -282,8 +288,14 @@ impl App {
                 });
                 let current_session = crate::tmux::current_session_cached(self.verbose);
                 let old_group_count = self.tree.groups.len();
-                // Exclude the TUI's own pane so it never lists itself (D7).
-                let my_pane_id = self.my_pane_id.clone();
+                // Exclude the TUI's own pane so it never lists itself (D7). In a
+                // popup the TUI lives in its own ephemeral pane, so my_pane_id is
+                // the originating pane — keep it listed (and selected by default).
+                let my_pane_id = if self.popup {
+                    String::new()
+                } else {
+                    self.my_pane_id.clone()
+                };
                 self.tree.rebuild(
                     &panes,
                     &states,

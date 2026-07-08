@@ -426,6 +426,18 @@ impl TreeState {
         }
     }
 
+    /// Jump cursor to the pane with the given id if it's visible. Returns
+    /// whether a match was found (so callers can fall back).
+    pub fn jump_to_pane(&mut self, pane_id: &str) -> bool {
+        match self.pane_cursor_position(pane_id) {
+            Some(pos) => {
+                self.cursor = pos;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Jump cursor to the last visible pane.
     pub fn jump_last_pane(&mut self) {
         let positions = self.pane_positions();
