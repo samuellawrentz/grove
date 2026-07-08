@@ -10,7 +10,33 @@ A CLI tool for managing multi-repo workspaces in AI-assisted development. Grove 
 
 ## Install
 
+### Prebuilt binary (recommended)
+
+Download the latest release for your platform and drop it on your `PATH`:
+
 ```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/samuellawrentz/grove/releases/latest/download/grove-macos-arm64.tar.gz | tar xz
+sudo mv grove /usr/local/bin/
+
+# macOS (Intel)
+curl -L https://github.com/samuellawrentz/grove/releases/latest/download/grove-macos-x86_64.tar.gz | tar xz
+sudo mv grove /usr/local/bin/
+
+# Linux (x86_64)
+curl -L https://github.com/samuellawrentz/grove/releases/latest/download/grove-linux-x86_64.tar.gz | tar xz
+sudo mv grove /usr/local/bin/
+
+grove --version
+```
+
+On macOS, if Gatekeeper blocks the binary: `xattr -d com.apple.quarantine /usr/local/bin/grove`.
+
+### From source
+
+```bash
+cargo install --git https://github.com/samuellawrentz/grove   # no clone needed
+# or, from a local checkout:
 cargo install --path .
 ```
 
@@ -99,6 +125,23 @@ tmux bind-key C-g run-shell "path/to/grove-picker.sh"
 | `Ctrl-X` | Kill pane |
 | `Ctrl-N` | Spawn new Claude session |
 | `Ctrl-P` | Send custom prompt |
+
+## Raycast extension
+
+A Raycast extension in `raycast/` wraps the CLI — list/create tasks, browse repos, and sync, all from Raycast.
+
+The extension isn't on the Raycast Store yet, so install it as a local dev extension:
+
+1. Install the `grove` CLI (see [Install](#install)).
+2. Get the extension source (it lives in the `raycast/` folder of this repo).
+3. Build and import it:
+   ```bash
+   cd raycast
+   npm install
+   npm run dev        # imports into Raycast and starts dev mode
+   ```
+   Raycast picks up the extension while `npm run dev` runs. To keep it after stopping, use **Import Extension** in Raycast and point it at the `raycast/` folder.
+4. Open Raycast → **Grove** commands. In the extension preferences, set **Grove Binary Path** to your `grove` location (e.g. `/usr/local/bin/grove` or `~/.cargo/bin/grove`) and pick your **Terminal App**.
 
 ## JSON Output Contract
 
