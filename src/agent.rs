@@ -277,6 +277,23 @@ fn read_state_file_from(path: &Path, now: u64) -> Result<HashMap<String, AgentSt
         .collect())
 }
 
+/// Per-pane state with the staleness filter *off*.
+///
+/// `STATE_TTL_SECS` exists so a crashed agent stops rendering green forever, and
+/// for display that is right. But the hook stamps `active` once when a turn
+/// starts and never refreshes it, so the TTL also expires the entry under any
+/// turn that simply takes a while — and a busy agent reads as `NotRunning`.
+///
+/// A caller that is *waiting* for a turn to end must not mistake that for the
+/// turn ending. `grove wait` therefore reads the un-expired truth and leans on
+/// its own timeout as the backstop against an agent that really did die.
+pub fn read_state_file_unexpired() -> Result<HashMap<String, AgentState>, GroveError> {
+    Ok(read_entries(&state_file_path())?
+        .into_iter()
+        .map(|(id, e)| (id, e.state))
+        .collect())
+}
+
 /// Read pane_id -> AgentKind for entries that declare a `kind`. Lets non-Claude
 /// agents (Codex, OpenCode, ...) report their identity via the same state file.
 pub fn read_state_kinds() -> HashMap<String, AgentKind> {
