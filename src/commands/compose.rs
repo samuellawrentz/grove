@@ -3,7 +3,7 @@ use crate::tmux;
 
 /// Find the pane above the current one (the claude pane).
 fn detect_target_pane() -> Result<String, GroveError> {
-    let my_pane = tmux::get_pane_id("", false)?;
+    let my_pane = tmux::current_pane_id(false)?;
     let output = tmux::run_tmux(&["list-panes", "-F", "#{pane_id} #{pane_top}"], false)?;
 
     let mut panes: Vec<(&str, i32)> = output

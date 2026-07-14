@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use crate::error::GroveError;
 
 /// Information about a single tmux pane.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct PaneInfo {
     pub pane_id: String,
@@ -87,12 +87,32 @@ pub fn current_session_cached(verbose: bool) -> Option<String> {
 }
 
 /// Create a named window in a specific session with a working directory.
+/// Returns the new window's pane id.
 pub fn new_named_window(
     session: &str,
     window_name: &str,
     cwd: &Path,
     verbose: bool,
-) -> Result<(), GroveError> {
+) -> Result<String, GroveError> {
+    new_named_window_with(session, window_name, cwd, |args| run_tmux(args, verbose))
+}
+
+/// Window options that stop tmux from renaming a window out from under grove.
+/// A program in the pane emitting a title escape would otherwise rewrite the
+/// name, orphaning every `session:grove-<task>` target grove recorded.
+const NAME_PINNING_OPTIONS: [(&str, &str); 2] =
+    [("automatic-rename", "off"), ("allow-rename", "off")];
+
+/// Pure over the tmux runner so the issued command sequence is unit-testable.
+pub(crate) fn new_named_window_with<F>(
+    session: &str,
+    window_name: &str,
+    cwd: &Path,
+    mut run: F,
+) -> Result<String, GroveError>
+where
+    F: FnMut(&[&str]) -> Result<String, GroveError>,
+{
     let cwd_str = cwd
         .to_str()
         .ok_or_else(|| GroveError::General("invalid path for tmux window".to_string()))?;
@@ -103,19 +123,30 @@ pub fn new_named_window(
     // colon forces a session target so tmux picks the next free, base-index-aware index.
     let target = format!("{session}:");
 
-    run_tmux(
-        &[
-            "new-window",
-            "-t",
-            &target,
-            "-n",
-            window_name,
-            "-c",
-            cwd_str,
-        ],
-        verbose,
-    )?;
-    Ok(())
+    // Ask for the ids up front: addressing the window by `@id` and the pane by
+    // `%id` is immune to any later renaming or reindexing.
+    let created = run(&[
+        "new-window",
+        "-t",
+        &target,
+        "-n",
+        window_name,
+        "-c",
+        cwd_str,
+        "-P",
+        "-F",
+        "#{window_id}\t#{pane_id}",
+    ])?;
+
+    let (window_id, pane_id) = created.trim().split_once('\t').ok_or_else(|| {
+        GroveError::General(format!("tmux new-window returned no ids: {created:?}"))
+    })?;
+
+    for (option, value) in NAME_PINNING_OPTIONS {
+        run(&["set-option", "-w", "-t", window_id, option, value])?;
+    }
+
+    Ok(pane_id.to_string())
 }
 
 /// Switch to a window within the current session.
@@ -148,12 +179,54 @@ pub fn kill_window(target: &str, verbose: bool) -> Result<(), GroveError> {
     Ok(())
 }
 
-/// Get the pane ID for a window target (also used as refresh_pane_id).
-pub fn get_pane_id(target: &str, verbose: bool) -> Result<String, GroveError> {
-    run_tmux(
-        &["display-message", "-t", target, "-p", "#{pane_id}"],
-        verbose,
-    )
+/// Get the pane ID of the *current* pane.
+///
+/// Deliberately takes no target. `display-message -t <target>` answers with the
+/// active pane and exits 0 when the target does not exist, so it cannot be used to
+/// resolve — or prove the existence of — another task's pane. Use
+/// [`locate_task_pane`] against [`list_all_panes`] for that.
+pub fn current_pane_id(verbose: bool) -> Result<String, GroveError> {
+    run_tmux(&["display-message", "-p", "#{pane_id}"], verbose)
+}
+
+/// Find a task's live pane among all panes.
+///
+/// Liveness must never be decided with `tmux display-message -t <target>`: for a
+/// target that does not exist tmux answers with the *active* pane and exits 0, so
+/// every lookup "succeeds" and every task looks alive. Match against the real pane
+/// list instead.
+pub fn locate_task_pane<'a>(
+    panes: &'a [PaneInfo],
+    pane_id: Option<&str>,
+    window: Option<&str>,
+    path: &Path,
+) -> Option<&'a PaneInfo> {
+    // 1. Stable pane id: survives window renames.
+    if let Some(id) = pane_id {
+        if let Some(p) = panes.iter().find(|p| p.pane_id == id) {
+            return Some(p);
+        }
+    }
+    // 2. Recorded `session:window` target: survives the pane being recreated.
+    if let Some((session, name)) = window.and_then(split_window_target) {
+        if let Some(p) = panes
+            .iter()
+            .find(|p| p.session_name == session && p.window_name == name)
+        {
+            return Some(p);
+        }
+    }
+    // 3. Worktree path: last resort when a pane was recreated *and* its window was
+    //    renamed. `Path::starts_with` compares whole components, so the sibling
+    //    task `tasks/review` never claims `tasks/review-gate`'s pane.
+    panes.iter().find(|p| p.current_path.starts_with(path))
+}
+
+/// Split a recorded `session:window` target. Sessions cannot contain `:`, so the
+/// first separator is the boundary.
+fn split_window_target(target: &str) -> Option<(&str, &str)> {
+    let (session, name) = target.split_once(':')?;
+    (!session.is_empty() && !name.is_empty()).then_some((session, name))
 }
 
 /// List all panes across all tmux sessions.
@@ -340,6 +413,168 @@ pub fn send_raw_keys(target: &str, keys: &[&str], verbose: bool) -> Result<(), G
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn make_pane(pane_id: &str, session: &str, window_name: &str, path: &str) -> PaneInfo {
+        PaneInfo {
+            pane_id: pane_id.to_string(),
+            session_name: session.to_string(),
+            window_index: 1,
+            window_name: window_name.to_string(),
+            current_path: PathBuf::from(path),
+            current_command: "zsh".to_string(),
+            start_command: "zsh".to_string(),
+            pid: 1234,
+            activity: 0,
+        }
+    }
+
+    /// The rename drift at its source: tmux rewrites a window's name whenever a
+    /// program in the pane emits a title escape, so a window grove created as
+    /// `grove-review-gate` silently becomes e.g. `2.1.206` and every recorded
+    /// `session:name` target stops matching. Creation must pin the name off.
+    #[test]
+    fn new_named_window_pins_the_name_against_tmux_renaming() {
+        let mut issued: Vec<Vec<String>> = Vec::new();
+
+        let pane_id = new_named_window_with(
+            "0",
+            "grove-review-gate",
+            Path::new("/home/user/tasks/review-gate"),
+            |args| {
+                issued.push(args.iter().map(|s| s.to_string()).collect());
+                Ok("@7\t%183".to_string())
+            },
+        )
+        .expect("window creation should succeed");
+
+        assert_eq!(pane_id, "%183", "pane id comes from the created window");
+
+        let joined: Vec<String> = issued.iter().map(|a| a.join(" ")).collect();
+        assert!(
+            joined[0].contains("new-window") && joined[0].contains("-n grove-review-gate"),
+            "first command creates the named window, got: {:?}",
+            joined[0]
+        );
+        assert!(
+            joined
+                .iter()
+                .any(|c| c.contains("automatic-rename off") && c.contains("@7")),
+            "automatic-rename must be pinned off on the new window, got: {joined:?}"
+        );
+        assert!(
+            joined
+                .iter()
+                .any(|c| c.contains("allow-rename off") && c.contains("@7")),
+            "allow-rename must be pinned off on the new window, got: {joined:?}"
+        );
+    }
+
+    /// A task whose window was killed has no live pane. `tmux display-message -t`
+    /// answers with the *active* pane for a target that does not exist (exit 0),
+    /// so liveness must be decided against the real pane list, never that call.
+    #[test]
+    fn locate_task_pane_none_when_window_gone() {
+        let panes = [make_pane("%1", "0", "other-window", "/home/user/elsewhere")];
+
+        let found = locate_task_pane(
+            &panes,
+            Some("%171"),
+            Some("0:grove-review-gate"),
+            Path::new("/home/user/tasks/review-gate"),
+        );
+
+        assert!(found.is_none());
+    }
+
+    /// tmux renames windows out from under grove (a program in the pane emits a
+    /// title escape and `automatic-rename` rewrites the name). The recorded
+    /// pane_id is stable across that, so it is the primary anchor.
+    #[test]
+    fn locate_task_pane_by_pane_id_despite_window_rename() {
+        let panes = [make_pane(
+            "%169",
+            "0",
+            "2.1.208",
+            "/home/user/tasks/glance-ship",
+        )];
+
+        let found = locate_task_pane(
+            &panes,
+            Some("%169"),
+            Some("0:grove-glance-ship"), // name no longer matches anything
+            Path::new("/home/user/tasks/glance-ship"),
+        )
+        .expect("pane_id anchor should find the renamed window's pane");
+
+        assert_eq!(found.pane_id, "%169");
+    }
+
+    /// A pane recreated inside the same window gets a fresh id, so a stale
+    /// recorded pane_id must fall through to the `session:window` target.
+    #[test]
+    fn locate_task_pane_by_window_when_pane_id_stale() {
+        let panes = [
+            make_pane("%9", "0", "unrelated", "/home/user"),
+            make_pane(
+                "%172",
+                "0",
+                "grove-review-gate",
+                "/home/user/tasks/review-gate",
+            ),
+        ];
+
+        let found = locate_task_pane(
+            &panes,
+            Some("%171"), // stale: pane was recreated as %172
+            Some("0:grove-review-gate"),
+            Path::new("/home/user/tasks/review-gate"),
+        )
+        .expect("window target should find the pane when pane_id is stale");
+
+        assert_eq!(found.pane_id, "%172");
+    }
+
+    /// Both anchors can rot at once: the pane was recreated (new id) *and* the
+    /// window was auto-renamed. The worktree path still identifies the task, and
+    /// a subdirectory of it counts — an agent may `cd` deeper while working.
+    #[test]
+    fn locate_task_pane_by_path_when_pane_id_and_window_stale() {
+        let panes = [
+            make_pane("%9", "0", "zsh", "/home/user"),
+            make_pane(
+                "%180",
+                "0",
+                "2.1.208",
+                "/home/user/tasks/glance-ship/artifacts",
+            ),
+        ];
+
+        let found = locate_task_pane(
+            &panes,
+            Some("%168"),                // stale
+            Some("0:grove-glance-ship"), // drifted away
+            Path::new("/home/user/tasks/glance-ship"),
+        )
+        .expect("worktree path should identify the task's pane when both anchors rot");
+
+        assert_eq!(found.pane_id, "%180");
+    }
+
+    /// The path fallback must not claim a *different* task's pane: `tasks/review`
+    /// is not a parent of `tasks/review-gate`, despite the string prefix.
+    #[test]
+    fn locate_task_pane_path_does_not_match_sibling_task() {
+        let panes = [make_pane(
+            "%5",
+            "0",
+            "2.1.206",
+            "/home/user/tasks/review-gate",
+        )];
+
+        let found = locate_task_pane(&panes, None, None, Path::new("/home/user/tasks/review"));
+
+        assert!(found.is_none());
+    }
 
     /// SESSION-cached-once (S16): the underlying resolver runs only once across
     /// multiple `current_session_once` calls against the same cell.

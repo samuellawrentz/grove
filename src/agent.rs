@@ -267,27 +267,56 @@ pub fn launch_in_pane(target: &str, command: &str, verbose: bool) -> Result<(), 
     tmux::send_keys(target, command, verbose)
 }
 
-/// Resolve live tmux state for a task: re-query pane ID and check agent state.
-/// Returns (tmux_alive, agent_state).
+/// A task's live tmux presence: the pane it was actually found at (if any) and the
+/// agent state of *that* pane.
+pub struct TaskLiveness {
+    /// The pane grove located, which may differ from the recorded `pane_id` when
+    /// the pane was recreated or the window renamed. `None` means the task is dead.
+    pub pane_id: Option<String>,
+    pub agent_state: AgentState,
+}
+
+impl TaskLiveness {
+    pub fn alive(&self) -> bool {
+        self.pane_id.is_some()
+    }
+}
+
+/// Resolve live tmux state for a task against the real pane list.
+///
+/// Callers pass `panes` from a single `tmux::list_all_panes` so a task list costs
+/// one tmux call, not one per task.
 pub fn resolve_task_state(
     task: &TaskEntry,
+    panes: &[PaneInfo],
     agent_states: &HashMap<String, AgentState>,
-    verbose: bool,
-) -> (bool, AgentState) {
-    let Some(ref target) = task.tmux_window else {
-        return (false, AgentState::NotRunning);
-    };
-
-    match tmux::get_pane_id(target, verbose) {
-        Ok(live_pane_id) => {
-            let state = agent_states
-                .get(&live_pane_id)
+) -> TaskLiveness {
+    match locate_task_pane(task, panes) {
+        Some(pane) => TaskLiveness {
+            agent_state: agent_states
+                .get(&pane.pane_id)
                 .cloned()
-                .unwrap_or(AgentState::NotRunning);
-            (true, state)
-        }
-        Err(_) => (false, AgentState::NotRunning),
+                .unwrap_or(AgentState::NotRunning),
+            pane_id: Some(pane.pane_id.clone()),
+        },
+        None => TaskLiveness {
+            pane_id: None,
+            agent_state: AgentState::NotRunning,
+        },
     }
+}
+
+/// Find the live pane backing a task, if any.
+pub fn locate_task_pane<'a>(task: &TaskEntry, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo> {
+    // A task created without tmux has no pane to find.
+    task.tmux_window.as_deref()?;
+
+    tmux::locate_task_pane(
+        panes,
+        task.pane_id.as_deref(),
+        task.tmux_window.as_deref(),
+        &task.path,
+    )
 }
 
 /// Find which agent def matches a pane's command name or start command.
@@ -650,6 +679,105 @@ mod tests {
             pid: 1,
             activity: 0,
         }
+    }
+
+    fn task_with(id: &str, pane_id: Option<&str>, window: Option<&str>, path: &str) -> TaskEntry {
+        TaskEntry {
+            id: id.to_string(),
+            path: PathBuf::from(path),
+            repos: Vec::new(),
+            created_at: chrono::Utc::now(),
+            tmux_window: window.map(str::to_string),
+            pane_id: pane_id.map(str::to_string),
+        }
+    }
+
+    fn located_pane(pane_id: &str, window_name: &str, path: &str) -> PaneInfo {
+        let mut p = make_pane(pane_id, "zsh");
+        p.session_name = "0".to_string();
+        p.window_name = window_name.to_string();
+        p.current_path = PathBuf::from(path);
+        p
+    }
+
+    /// The bug this replaces: liveness was decided by `tmux display-message -t`,
+    /// which returns the *active* pane and exits 0 for a window that does not
+    /// exist — so every task with a recorded window reported alive. A task whose
+    /// window is gone is dead, no matter what else is on screen.
+    #[test]
+    fn resolve_task_state_dead_when_no_pane_matches() {
+        let task = task_with(
+            "review-ao",
+            Some("%70"),
+            Some("0:grove-review-ao"),
+            "/home/user/tasks/review-ao",
+        );
+        // The only live pane belongs to something else entirely.
+        let panes = [located_pane(
+            "%180",
+            "2.1.208",
+            "/home/user/tasks/glance-ship",
+        )];
+        let states = HashMap::from([("%180".to_string(), AgentState::Active)]);
+
+        let live = resolve_task_state(&task, &panes, &states);
+
+        assert!(
+            !live.alive(),
+            "task with no matching pane must not report alive"
+        );
+        assert_eq!(live.pane_id, None);
+        assert_eq!(
+            live.agent_state,
+            AgentState::NotRunning,
+            "must not inherit the active pane's agent state"
+        );
+    }
+
+    /// Reporting must name the pane grove actually found, not the stale one it had
+    /// recorded — otherwise `grove list` still prints a pane id that does not exist.
+    #[test]
+    fn resolve_task_state_reports_the_live_pane_id_not_the_stale_one() {
+        let task = task_with(
+            "review-gate",
+            Some("%171"), // stale: pane was recreated as %172
+            Some("0:grove-review-gate"),
+            "/home/user/tasks/review-gate",
+        );
+        let panes = [located_pane(
+            "%172",
+            "grove-review-gate",
+            "/home/user/tasks/review-gate",
+        )];
+
+        let live = resolve_task_state(&task, &panes, &HashMap::new());
+
+        assert_eq!(live.pane_id.as_deref(), Some("%172"));
+        assert!(live.alive());
+    }
+
+    /// State is keyed by the *located* pane, so a renamed window still reports the
+    /// agent actually running in the task.
+    #[test]
+    fn resolve_task_state_reports_located_panes_agent() {
+        let task = task_with(
+            "glance-ship",
+            Some("%169"),
+            Some("0:grove-glance-ship"),
+            "/home/user/tasks/glance-ship",
+        );
+        let panes = [located_pane(
+            "%169",
+            "2.1.208",
+            "/home/user/tasks/glance-ship",
+        )];
+        let states = HashMap::from([("%169".to_string(), AgentState::Waiting)]);
+
+        let live = resolve_task_state(&task, &panes, &states);
+
+        assert!(live.alive());
+        assert_eq!(live.pane_id.as_deref(), Some("%169"));
+        assert_eq!(live.agent_state, AgentState::Waiting);
     }
 
     #[test]

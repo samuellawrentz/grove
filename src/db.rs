@@ -616,6 +616,18 @@ impl Db {
         })
     }
 
+    /// Re-anchor a task on the pane id it was actually found at. A pane recreated
+    /// inside the task's window gets a fresh id, so the recorded one goes stale;
+    /// commands that locate the pane by a fallback write the live id back. No-op
+    /// for an unknown task.
+    pub fn heal_pane_id(&self, task_id: &str, pane_id: &str) -> Result<(), GroveError> {
+        self.conn.execute(
+            "UPDATE tasks SET pane_id = ?2 WHERE id = ?1",
+            rusqlite::params![task_id, pane_id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_task(&self, id: &str) -> Result<Option<TaskEntry>, GroveError> {
         let mut stmt = self
             .conn
@@ -874,6 +886,30 @@ mod tests {
                 branch: "feat/my-branch".to_string(),
             }],
         }
+    }
+
+    /// `attach`/`send` re-anchor a task on the pane they actually found, so a
+    /// stale recorded id (pane recreated) converges instead of rotting forever.
+    #[test]
+    fn heal_pane_id_rewrites_stale_id() {
+        let db = open_temp();
+        db.upsert_task(&make_task("TASK-HEAL")).unwrap();
+
+        db.heal_pane_id("TASK-HEAL", "%172").unwrap();
+
+        let got = db.get_task("TASK-HEAL").unwrap().unwrap();
+        assert_eq!(got.pane_id.as_deref(), Some("%172"));
+        // Healing the anchor must not disturb anything else about the task.
+        assert_eq!(got.tmux_window.as_deref(), Some("mysession:grove-task"));
+        assert_eq!(got.repos.len(), 1);
+    }
+
+    /// Healing an unknown task is a no-op, not an error: `send` must not fail
+    /// after the prompt already landed.
+    #[test]
+    fn heal_pane_id_is_noop_for_unknown_task() {
+        let db = open_temp();
+        assert!(db.heal_pane_id("NOPE", "%1").is_ok());
     }
 
     #[test]

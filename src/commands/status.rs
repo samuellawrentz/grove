@@ -2,6 +2,7 @@ use crate::agent;
 use crate::commands::Ctx;
 use crate::error::GroveError;
 use crate::output;
+use crate::tmux;
 
 pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
     let db = ctx.db;
@@ -18,6 +19,7 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
     }
 
     let agent_states = agent::read_state_file().unwrap_or_default();
+    let panes = tmux::list_all_panes(verbose).unwrap_or_default();
 
     let tasks: Vec<_> = if let Some(id) = task_id {
         all_tasks.into_iter().filter(|t| t.id == id).collect()
@@ -29,8 +31,8 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
         let task_list: Vec<serde_json::Value> = tasks
             .iter()
             .map(|t| {
-                let (tmux_alive, live_agent_state) =
-                    agent::resolve_task_state(t, &agent_states, verbose);
+                let live = agent::resolve_task_state(t, &panes, &agent_states);
+                let (tmux_alive, live_agent_state) = (live.alive(), live.agent_state);
                 let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
 
                 serde_json::json!({
@@ -39,7 +41,7 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
                     "repos": repo_names,
                     "branch": t.repos.first().map(|r| r.branch.as_str()).unwrap_or(""),
                     "tmux_window": t.tmux_window,
-                    "pane_id": t.pane_id,
+                    "pane_id": live.pane_id,
                     "tmux_alive": tmux_alive,
                     "claude_state": live_agent_state.to_string(),
                     "agent_state": live_agent_state.to_string(),
@@ -56,8 +58,8 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
         }
 
         for t in &tasks {
-            let (tmux_alive, live_agent_state) =
-                agent::resolve_task_state(t, &agent_states, verbose);
+            let live = agent::resolve_task_state(t, &panes, &agent_states);
+            let (tmux_alive, live_agent_state) = (live.alive(), live.agent_state);
             let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
             let branch = t.repos.first().map(|r| r.branch.as_str()).unwrap_or("");
 
@@ -67,7 +69,7 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
                 Some(w) => format!("{w} [dead]"),
             };
 
-            let pane_str = t.pane_id.as_deref().unwrap_or("-");
+            let pane_str = live.pane_id.as_deref().unwrap_or("-");
 
             println!(
                 "Task: {}  Window: {}  Pane: {}  Agent: {}",
