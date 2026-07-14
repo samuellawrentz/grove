@@ -51,34 +51,62 @@ fn resolve_send_target<'a>(
     Ok(pane)
 }
 
-pub fn run(task_id: &str, prompt: &str, ctx: &Ctx) -> Result<(), GroveError> {
-    let db = ctx.db;
-    let json_mode = ctx.json_mode;
-    let verbose = ctx.verbose;
+/// Appended by `--brief`. An orchestrator reads only the agent's final message
+/// (see `grove read`), so asking for that message to *be* the report is the
+/// cheapest possible summarization: it costs the orchestrator nothing and saves
+/// it from pulling the whole transcript to work out what happened.
+const BRIEF_SUFFIX: &str = "\n\nWhen you are done, end your final message with a summary of at \
+most 5 lines: what changed, which files, what you verified, and any blockers. \
+No preamble.";
 
-    let task = db
+/// Deliver a prompt to a task's pane and return the pane it landed in.
+/// Shared by `grove send` and `grove run` — the guard rails belong to both.
+pub fn deliver(
+    task_id: &str,
+    prompt: &str,
+    brief: bool,
+    ctx: &Ctx,
+) -> Result<(TaskEntry, String), GroveError> {
+    let task = ctx
+        .db
         .get_task(task_id)?
         .ok_or_else(|| GroveError::TaskNotFound(task_id.to_string()))?;
 
     let agent_states = agent::read_state_file().unwrap_or_default();
-    let panes = tmux::list_all_panes(verbose).unwrap_or_default();
+    let panes = tmux::list_all_panes(ctx.verbose).unwrap_or_default();
 
     let pane = resolve_send_target(&task, &panes, &agent_states)?;
     let live_pane_id = pane.pane_id.clone();
 
+    let text = if brief {
+        format!("{prompt}{BRIEF_SUFFIX}")
+    } else {
+        prompt.to_string()
+    };
+
     // Address the pane directly: a pane id is unambiguous and survives the window
     // being renamed, whereas a stale `session:name` target resolves to nothing.
-    tmux::send_keys(&live_pane_id, prompt, verbose)?;
+    tmux::send_keys(&live_pane_id, &text, ctx.verbose)?;
 
-    db.heal_pane_id(task_id, &live_pane_id)?;
+    ctx.db.heal_pane_id(task_id, &live_pane_id)?;
+
+    Ok((task, live_pane_id))
+}
+
+pub fn run(task_id: &str, prompt: &str, brief: bool, ctx: &Ctx) -> Result<(), GroveError> {
+    let (task, pane_id) = deliver(task_id, prompt, brief, ctx)?;
 
     let data = serde_json::json!({
         "task_id": task_id,
         "tmux_window": task.tmux_window,
-        "pane_id": live_pane_id,
+        "pane_id": pane_id,
         "prompt_sent": true,
     });
-    output::success(json_mode, &format!("Sent prompt to task '{task_id}'"), data);
+    output::success(
+        ctx.json_mode,
+        &format!("Sent prompt to task '{task_id}'"),
+        data,
+    );
 
     Ok(())
 }

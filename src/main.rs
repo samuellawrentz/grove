@@ -7,6 +7,7 @@ mod error;
 mod git;
 mod output;
 mod tmux;
+mod transcript;
 mod tui;
 mod validation;
 
@@ -93,7 +94,31 @@ fn run(cli: Cli) -> Result<(), GroveError> {
         Commands::List => commands::list::run(&ctx)?,
         Commands::Attach { task_id } => commands::attach::run(&task_id, &ctx)?,
         Commands::Status { task_id } => commands::status::run(task_id.as_deref(), &ctx)?,
-        Commands::Send { task_id, prompt } => commands::send::run(&task_id, &prompt, &ctx)?,
+        Commands::Send {
+            task_id,
+            prompt,
+            brief,
+        } => commands::send::run(&task_id, &prompt, brief, &ctx)?,
+        Commands::Wait {
+            task_ids,
+            any,
+            timeout,
+        } => commands::wait::run(&task_ids, any, timeout, &ctx)?,
+        Commands::Read {
+            task_id,
+            turns,
+            tools,
+            full,
+            max_chars,
+        } => commands::read::run(&task_id, turns, tools, full, max_chars, &ctx)?,
+        Commands::Run {
+            task_id,
+            prompt,
+            brief,
+            timeout,
+            max_chars,
+            tools,
+        } => commands::run::run(&task_id, &prompt, brief, timeout, max_chars, tools, &ctx)?,
         Commands::Tui { popup } => {
             if !tmux::is_tmux_available() {
                 return Err(GroveError::TmuxNotRunning("tmux is not installed".into()));

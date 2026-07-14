@@ -167,8 +167,14 @@ pub fn window_exists(session: &str, window_name: &str, verbose: bool) -> bool {
 
 /// Send text to a tmux pane using literal mode, then press Enter.
 /// Two separate tmux calls to avoid key interpretation issues.
+///
+/// The pause matters: an agent TUI receiving a large literal burst is still
+/// redrawing its input box when the Enter arrives, and a submit that lands
+/// mid-paste gets absorbed as a newline. The prompt then sits in the box,
+/// unsent — which looks exactly like an agent that ignored you.
 pub fn send_keys(target: &str, text: &str, verbose: bool) -> Result<(), GroveError> {
     run_tmux(&["send-keys", "-t", target, "-l", text], verbose)?;
+    std::thread::sleep(std::time::Duration::from_millis(150));
     run_tmux(&["send-keys", "-t", target, "Enter"], verbose)?;
     Ok(())
 }

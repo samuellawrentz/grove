@@ -141,13 +141,69 @@ pub enum Commands {
         task_id: Option<String>,
     },
 
-    /// Send a prompt to Claude in a task
+    /// Send a prompt to the agent in a task (returns immediately)
     Send {
         /// Task identifier
         #[arg(add = ArgValueCandidates::new(complete_tasks))]
         task_id: String,
         /// Prompt text to send
         prompt: String,
+        /// Ask the agent to end its turn with a 5-line summary
+        #[arg(long)]
+        brief: bool,
+    },
+
+    /// Block until a task's agent finishes its turn
+    Wait {
+        /// Task identifiers
+        #[arg(required = true, add = ArgValueCandidates::new(complete_tasks))]
+        task_ids: Vec<String>,
+        /// Return as soon as the first task finishes, not all of them
+        #[arg(long)]
+        any: bool,
+        /// Give up after this many seconds
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+    },
+
+    /// Print what a task's agent last said, from its transcript
+    Read {
+        /// Task identifier
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
+        task_id: String,
+        /// How many trailing agent turns to show
+        #[arg(long, default_value_t = 1)]
+        turns: usize,
+        /// Annotate each turn with the tools it called
+        #[arg(long)]
+        tools: bool,
+        /// Include tool calls and results too (expensive)
+        #[arg(long)]
+        full: bool,
+        /// Cap output length; 0 for no cap
+        #[arg(long, default_value_t = 4000)]
+        max_chars: usize,
+    },
+
+    /// Send a prompt, wait for the turn to finish, print the reply
+    Run {
+        /// Task identifier
+        #[arg(add = ArgValueCandidates::new(complete_tasks))]
+        task_id: String,
+        /// Prompt text to send
+        prompt: String,
+        /// Ask the agent to end its turn with a 5-line summary
+        #[arg(long)]
+        brief: bool,
+        /// Give up after this many seconds
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Cap output length; 0 for no cap
+        #[arg(long, default_value_t = 4000)]
+        max_chars: usize,
+        /// Annotate the reply with the tools the agent called
+        #[arg(long)]
+        tools: bool,
     },
 
     /// Interactive TUI pane manager

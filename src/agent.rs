@@ -192,6 +192,23 @@ struct PaneStateEntry {
     /// Unix seconds of the last update; used to expire dead entries.
     #[serde(default)]
     updated: Option<u64>,
+    /// Absolute path to the agent's JSONL transcript, as reported by the hook.
+    /// Authoritative — it beats deriving the path from a cwd by convention.
+    #[serde(default)]
+    transcript: Option<String>,
+    /// Directory the agent is running in. Used to find a transcript when the
+    /// hook predates transcript recording.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Everything the hook knows about one pane.
+#[derive(Debug, Clone)]
+pub struct PaneSnapshot {
+    pub state: AgentState,
+    pub kind: Option<AgentKind>,
+    pub transcript: Option<std::path::PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 fn now_unix() -> u64 {
@@ -225,19 +242,38 @@ fn read_entries(path: &Path) -> Result<HashMap<String, PaneStateEntry>, GroveErr
     }
 }
 
+/// Read the hook's state file into a snapshot per live pane. Stale entries (see
+/// `STATE_TTL_SECS`) are dropped; a missing file yields an empty map, not an
+/// error. Every other reader in this module is a projection of this one.
+pub fn read_pane_snapshots() -> Result<HashMap<String, PaneSnapshot>, GroveError> {
+    read_snapshots_from(&state_file_path(), now_unix())
+}
+
+fn read_snapshots_from(path: &Path, now: u64) -> Result<HashMap<String, PaneSnapshot>, GroveError> {
+    Ok(read_entries(path)?
+        .into_iter()
+        .filter(|(_, e)| !is_stale(e, now))
+        .map(|(id, e)| {
+            let snapshot = PaneSnapshot {
+                state: e.state,
+                kind: e.kind.as_deref().and_then(AgentKind::parse),
+                transcript: e.transcript.filter(|s| !s.is_empty()).map(Into::into),
+                cwd: e.cwd.filter(|s| !s.is_empty()).map(Into::into),
+            };
+            (id, snapshot)
+        })
+        .collect())
+}
+
 /// Read the external hook's state file and return agent state per pane ID.
-/// Stale entries (see `STATE_TTL_SECS`) are dropped. Missing file returns an
-/// empty map (not an error).
 pub fn read_state_file() -> Result<HashMap<String, AgentState>, GroveError> {
     read_state_file_from(&state_file_path(), now_unix())
 }
 
 fn read_state_file_from(path: &Path, now: u64) -> Result<HashMap<String, AgentState>, GroveError> {
-    let raw = read_entries(path)?;
-    Ok(raw
+    Ok(read_snapshots_from(path, now)?
         .into_iter()
-        .filter(|(_, e)| !is_stale(e, now))
-        .map(|(id, e)| (id, e.state))
+        .map(|(id, s)| (id, s.state))
         .collect())
 }
 
@@ -248,17 +284,10 @@ pub fn read_state_kinds() -> HashMap<String, AgentKind> {
 }
 
 fn read_state_kinds_from(path: &Path, now: u64) -> HashMap<String, AgentKind> {
-    let Ok(raw) = read_entries(path) else {
-        return HashMap::new();
-    };
-    raw.into_iter()
-        .filter(|(_, e)| !is_stale(e, now))
-        .filter_map(|(id, e)| {
-            e.kind
-                .as_deref()
-                .and_then(AgentKind::parse)
-                .map(|k| (id, k))
-        })
+    read_snapshots_from(path, now)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, s)| s.kind.map(|k| (id, k)))
         .collect()
 }
 

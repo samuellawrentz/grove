@@ -27,6 +27,9 @@ pub enum GroveError {
 
     #[error("database error: {0}")]
     Database(String),
+
+    #[error("timed out: {0}")]
+    Timeout(String),
 }
 
 impl GroveError {
@@ -41,6 +44,7 @@ impl GroveError {
             GroveError::Conflict(_) => 6,
             GroveError::Tui(_) => 7,
             GroveError::Database(_) => 8,
+            GroveError::Timeout(_) => 9,
         }
     }
 
@@ -55,6 +59,7 @@ impl GroveError {
             GroveError::Conflict(_) => "conflict",
             GroveError::Tui(_) => "tui",
             GroveError::Database(_) => "database",
+            GroveError::Timeout(_) => "timeout",
         }
     }
 
