@@ -192,6 +192,23 @@ struct PaneStateEntry {
     /// Unix seconds of the last update; used to expire dead entries.
     #[serde(default)]
     updated: Option<u64>,
+    /// Absolute path to the agent's JSONL transcript, as reported by the hook.
+    /// Authoritative — it beats deriving the path from a cwd by convention.
+    #[serde(default)]
+    transcript: Option<String>,
+    /// Directory the agent is running in. Used to find a transcript when the
+    /// hook predates transcript recording.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Everything the hook knows about one pane.
+#[derive(Debug, Clone)]
+pub struct PaneSnapshot {
+    pub state: AgentState,
+    pub kind: Option<AgentKind>,
+    pub transcript: Option<std::path::PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 fn now_unix() -> u64 {
@@ -225,18 +242,54 @@ fn read_entries(path: &Path) -> Result<HashMap<String, PaneStateEntry>, GroveErr
     }
 }
 
+/// Read the hook's state file into a snapshot per live pane. Stale entries (see
+/// `STATE_TTL_SECS`) are dropped; a missing file yields an empty map, not an
+/// error. Every other reader in this module is a projection of this one.
+pub fn read_pane_snapshots() -> Result<HashMap<String, PaneSnapshot>, GroveError> {
+    read_snapshots_from(&state_file_path(), now_unix())
+}
+
+fn read_snapshots_from(path: &Path, now: u64) -> Result<HashMap<String, PaneSnapshot>, GroveError> {
+    Ok(read_entries(path)?
+        .into_iter()
+        .filter(|(_, e)| !is_stale(e, now))
+        .map(|(id, e)| {
+            let snapshot = PaneSnapshot {
+                state: e.state,
+                kind: e.kind.as_deref().and_then(AgentKind::parse),
+                transcript: e.transcript.filter(|s| !s.is_empty()).map(Into::into),
+                cwd: e.cwd.filter(|s| !s.is_empty()).map(Into::into),
+            };
+            (id, snapshot)
+        })
+        .collect())
+}
+
 /// Read the external hook's state file and return agent state per pane ID.
-/// Stale entries (see `STATE_TTL_SECS`) are dropped. Missing file returns an
-/// empty map (not an error).
 pub fn read_state_file() -> Result<HashMap<String, AgentState>, GroveError> {
     read_state_file_from(&state_file_path(), now_unix())
 }
 
 fn read_state_file_from(path: &Path, now: u64) -> Result<HashMap<String, AgentState>, GroveError> {
-    let raw = read_entries(path)?;
-    Ok(raw
+    Ok(read_snapshots_from(path, now)?
         .into_iter()
-        .filter(|(_, e)| !is_stale(e, now))
+        .map(|(id, s)| (id, s.state))
+        .collect())
+}
+
+/// Per-pane state with the staleness filter *off*.
+///
+/// `STATE_TTL_SECS` exists so a crashed agent stops rendering green forever, and
+/// for display that is right. But the hook stamps `active` once when a turn
+/// starts and never refreshes it, so the TTL also expires the entry under any
+/// turn that simply takes a while — and a busy agent reads as `NotRunning`.
+///
+/// A caller that is *waiting* for a turn to end must not mistake that for the
+/// turn ending. `grove wait` therefore reads the un-expired truth and leans on
+/// its own timeout as the backstop against an agent that really did die.
+pub fn read_state_file_unexpired() -> Result<HashMap<String, AgentState>, GroveError> {
+    Ok(read_entries(&state_file_path())?
+        .into_iter()
         .map(|(id, e)| (id, e.state))
         .collect())
 }
@@ -248,17 +301,10 @@ pub fn read_state_kinds() -> HashMap<String, AgentKind> {
 }
 
 fn read_state_kinds_from(path: &Path, now: u64) -> HashMap<String, AgentKind> {
-    let Ok(raw) = read_entries(path) else {
-        return HashMap::new();
-    };
-    raw.into_iter()
-        .filter(|(_, e)| !is_stale(e, now))
-        .filter_map(|(id, e)| {
-            e.kind
-                .as_deref()
-                .and_then(AgentKind::parse)
-                .map(|k| (id, k))
-        })
+    read_snapshots_from(path, now)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, s)| s.kind.map(|k| (id, k)))
         .collect()
 }
 
@@ -267,27 +313,56 @@ pub fn launch_in_pane(target: &str, command: &str, verbose: bool) -> Result<(), 
     tmux::send_keys(target, command, verbose)
 }
 
-/// Resolve live tmux state for a task: re-query pane ID and check agent state.
-/// Returns (tmux_alive, agent_state).
+/// A task's live tmux presence: the pane it was actually found at (if any) and the
+/// agent state of *that* pane.
+pub struct TaskLiveness {
+    /// The pane grove located, which may differ from the recorded `pane_id` when
+    /// the pane was recreated or the window renamed. `None` means the task is dead.
+    pub pane_id: Option<String>,
+    pub agent_state: AgentState,
+}
+
+impl TaskLiveness {
+    pub fn alive(&self) -> bool {
+        self.pane_id.is_some()
+    }
+}
+
+/// Resolve live tmux state for a task against the real pane list.
+///
+/// Callers pass `panes` from a single `tmux::list_all_panes` so a task list costs
+/// one tmux call, not one per task.
 pub fn resolve_task_state(
     task: &TaskEntry,
+    panes: &[PaneInfo],
     agent_states: &HashMap<String, AgentState>,
-    verbose: bool,
-) -> (bool, AgentState) {
-    let Some(ref target) = task.tmux_window else {
-        return (false, AgentState::NotRunning);
-    };
-
-    match tmux::get_pane_id(target, verbose) {
-        Ok(live_pane_id) => {
-            let state = agent_states
-                .get(&live_pane_id)
+) -> TaskLiveness {
+    match locate_task_pane(task, panes) {
+        Some(pane) => TaskLiveness {
+            agent_state: agent_states
+                .get(&pane.pane_id)
                 .cloned()
-                .unwrap_or(AgentState::NotRunning);
-            (true, state)
-        }
-        Err(_) => (false, AgentState::NotRunning),
+                .unwrap_or(AgentState::NotRunning),
+            pane_id: Some(pane.pane_id.clone()),
+        },
+        None => TaskLiveness {
+            pane_id: None,
+            agent_state: AgentState::NotRunning,
+        },
     }
+}
+
+/// Find the live pane backing a task, if any.
+pub fn locate_task_pane<'a>(task: &TaskEntry, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo> {
+    // A task created without tmux has no pane to find.
+    task.tmux_window.as_deref()?;
+
+    tmux::locate_task_pane(
+        panes,
+        task.pane_id.as_deref(),
+        task.tmux_window.as_deref(),
+        &task.path,
+    )
 }
 
 /// Find which agent def matches a pane's command name or start command.
@@ -650,6 +725,105 @@ mod tests {
             pid: 1,
             activity: 0,
         }
+    }
+
+    fn task_with(id: &str, pane_id: Option<&str>, window: Option<&str>, path: &str) -> TaskEntry {
+        TaskEntry {
+            id: id.to_string(),
+            path: PathBuf::from(path),
+            repos: Vec::new(),
+            created_at: chrono::Utc::now(),
+            tmux_window: window.map(str::to_string),
+            pane_id: pane_id.map(str::to_string),
+        }
+    }
+
+    fn located_pane(pane_id: &str, window_name: &str, path: &str) -> PaneInfo {
+        let mut p = make_pane(pane_id, "zsh");
+        p.session_name = "0".to_string();
+        p.window_name = window_name.to_string();
+        p.current_path = PathBuf::from(path);
+        p
+    }
+
+    /// The bug this replaces: liveness was decided by `tmux display-message -t`,
+    /// which returns the *active* pane and exits 0 for a window that does not
+    /// exist — so every task with a recorded window reported alive. A task whose
+    /// window is gone is dead, no matter what else is on screen.
+    #[test]
+    fn resolve_task_state_dead_when_no_pane_matches() {
+        let task = task_with(
+            "review-ao",
+            Some("%70"),
+            Some("0:grove-review-ao"),
+            "/home/user/tasks/review-ao",
+        );
+        // The only live pane belongs to something else entirely.
+        let panes = [located_pane(
+            "%180",
+            "2.1.208",
+            "/home/user/tasks/glance-ship",
+        )];
+        let states = HashMap::from([("%180".to_string(), AgentState::Active)]);
+
+        let live = resolve_task_state(&task, &panes, &states);
+
+        assert!(
+            !live.alive(),
+            "task with no matching pane must not report alive"
+        );
+        assert_eq!(live.pane_id, None);
+        assert_eq!(
+            live.agent_state,
+            AgentState::NotRunning,
+            "must not inherit the active pane's agent state"
+        );
+    }
+
+    /// Reporting must name the pane grove actually found, not the stale one it had
+    /// recorded — otherwise `grove list` still prints a pane id that does not exist.
+    #[test]
+    fn resolve_task_state_reports_the_live_pane_id_not_the_stale_one() {
+        let task = task_with(
+            "review-gate",
+            Some("%171"), // stale: pane was recreated as %172
+            Some("0:grove-review-gate"),
+            "/home/user/tasks/review-gate",
+        );
+        let panes = [located_pane(
+            "%172",
+            "grove-review-gate",
+            "/home/user/tasks/review-gate",
+        )];
+
+        let live = resolve_task_state(&task, &panes, &HashMap::new());
+
+        assert_eq!(live.pane_id.as_deref(), Some("%172"));
+        assert!(live.alive());
+    }
+
+    /// State is keyed by the *located* pane, so a renamed window still reports the
+    /// agent actually running in the task.
+    #[test]
+    fn resolve_task_state_reports_located_panes_agent() {
+        let task = task_with(
+            "glance-ship",
+            Some("%169"),
+            Some("0:grove-glance-ship"),
+            "/home/user/tasks/glance-ship",
+        );
+        let panes = [located_pane(
+            "%169",
+            "2.1.208",
+            "/home/user/tasks/glance-ship",
+        )];
+        let states = HashMap::from([("%169".to_string(), AgentState::Waiting)]);
+
+        let live = resolve_task_state(&task, &panes, &states);
+
+        assert!(live.alive());
+        assert_eq!(live.pane_id.as_deref(), Some("%169"));
+        assert_eq!(live.agent_state, AgentState::Waiting);
     }
 
     #[test]

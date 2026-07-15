@@ -318,23 +318,32 @@ fn create_tmux_window(
     let window_name = format!("{}-{}", config.tmux.session_prefix, task_id);
     let window_target = format!("{session}:{window_name}");
 
-    let created = if tmux::window_exists(&session, &window_name, verbose) {
+    let (pane_id, created) = if tmux::window_exists(&session, &window_name, verbose) {
         if verbose {
             eprintln!("tmux window '{window_name}' already exists, reusing");
         }
-        false
+        // Resolve the reused window's pane from the real pane list. `display-message
+        // -t <target>` cannot be trusted here: for a target that does not exist it
+        // answers with the *active* pane and exits 0.
+        let panes = tmux::list_all_panes(verbose)?;
+        let pane = tmux::locate_task_pane(&panes, None, Some(&window_target), task_dir)
+            .ok_or_else(|| {
+                GroveError::TmuxNotRunning(format!(
+                    "could not find pane for window '{window_name}'"
+                ))
+            })?;
+        (pane.pane_id.clone(), false)
     } else {
-        tmux::new_named_window(&session, &window_name, task_dir, verbose)?;
-        true
+        let pane_id = tmux::new_named_window(&session, &window_name, task_dir, verbose)?;
+        (pane_id, true)
     };
-
-    let pane_id = tmux::get_pane_id(&window_target, verbose)?;
 
     let mut launched_kind: Option<agent::AgentKind> = None;
     if !no_claude && config.auto_launch_claude {
         let agent_name = opts.agent.unwrap_or("claude");
         let cmd = config.resolved_agent_command(agent_name);
-        agent::launch_in_pane(&window_target, &cmd, verbose)?;
+        // Target the pane directly — stable regardless of window renaming.
+        agent::launch_in_pane(&pane_id, &cmd, verbose)?;
         launched_kind =
             agent::AgentKind::parse(agent_name).or_else(|| agent::AgentKind::from_command(&cmd));
     }

@@ -35,6 +35,19 @@ PANE_ID="${TMUX_PANE:-}"
 kind="${1:-claude}"
 action="${2:-active}"
 
+# Claude pipes a JSON payload on stdin containing `transcript_path` — the exact
+# JSONL file for this session. Recording it is what lets `grove read` quote the
+# agent's own words instead of scraping the redrawn TUI out of capture-pane.
+# Agents that pass nothing (or a tty) just leave it empty; the read path then
+# falls back to deriving the path from cwd by convention.
+TRANSCRIPT=""
+if [[ ! -t 0 ]]; then
+  payload="$(cat 2>/dev/null || true)"
+  if [[ -n "$payload" ]]; then
+    TRANSCRIPT="$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null || true)"
+  fi
+fi
+
 # Serialize concurrent updates from sibling panes. `mkdir` is atomic on all
 # POSIX filesystems, so it works as a lock even where `flock` is absent (macOS).
 LOCK_DIR="${STATE_FILE}.lock"
@@ -57,11 +70,20 @@ fi
 
 # Upsert this pane's state, tagged with the agent kind and a timestamp
 # (grove expires entries older than its TTL so dead panes drop off).
+# An event that carries no transcript path must not erase one we already have:
+# only some lifecycle events ship a payload, but the session is the same one.
 jq --arg pane "$PANE_ID" \
    --arg state "$action" \
    --arg kind "$kind" \
    --arg cwd "${PWD:-}" \
+   --arg transcript "$TRANSCRIPT" \
    --argjson now "$(date +%s)" \
-   '.[$pane] = { state: $state, kind: $kind, cwd: $cwd, updated: $now }' \
+   '.[$pane] = {
+      state: $state,
+      kind: $kind,
+      cwd: $cwd,
+      transcript: (if $transcript == "" then (.[$pane].transcript // "") else $transcript end),
+      updated: $now
+    }' \
    "$STATE_FILE" > "${STATE_FILE}.tmp" \
   && mv "${STATE_FILE}.tmp" "$STATE_FILE"

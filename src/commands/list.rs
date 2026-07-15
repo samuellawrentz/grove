@@ -2,6 +2,7 @@ use crate::agent;
 use crate::commands::Ctx;
 use crate::error::GroveError;
 use crate::output;
+use crate::tmux;
 
 pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
     let db = ctx.db;
@@ -16,6 +17,7 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
     }
 
     let agent_states = agent::read_state_file().unwrap_or_default();
+    let panes = tmux::list_all_panes(verbose).unwrap_or_default();
 
     if json_mode {
         let task_list: Vec<serde_json::Value> = tasks
@@ -25,8 +27,8 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
                 let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
                 let branch = t.repos.first().map(|r| r.branch.as_str()).unwrap_or("");
 
-                let (tmux_alive, agent_state) =
-                    agent::resolve_task_state(t, &agent_states, verbose);
+                let live = agent::resolve_task_state(t, &panes, &agent_states);
+                let (tmux_alive, agent_state) = (live.alive(), live.agent_state);
 
                 serde_json::json!({
                     "task_id": t.id,
@@ -37,7 +39,7 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
                     "created_at": t.created_at,
                     "exists": exists,
                     "tmux_window": t.tmux_window,
-                    "pane_id": t.pane_id,
+                    "pane_id": live.pane_id,
                     "tmux_alive": tmux_alive,
                     "claude_state": agent_state.to_string(),
                     "agent_state": agent_state.to_string(),
@@ -55,7 +57,8 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
             let stale = t.is_stale();
             let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
 
-            let (tmux_alive, agent_state) = agent::resolve_task_state(t, &agent_states, verbose);
+            let live = agent::resolve_task_state(t, &panes, &agent_states);
+            let (tmux_alive, agent_state) = (live.alive(), live.agent_state);
 
             let tmux_str = match &t.tmux_window {
                 None => "(none)".to_string(),

@@ -177,9 +177,22 @@ pub fn run(
 
     // Tolerate an already-gone or unremovable path: the DB row must be cleared
     // regardless so close is idempotent and never strands a task row (N4).
+    //
+    // Guard the recursive delete on containment. `task.path` is not necessarily
+    // one `init` validated — `migrate_state_json` imports paths from a legacy
+    // `state.json` grove never checked — so a path pointing outside the tasks
+    // dir must be refused, not deleted. Belt-and-suspenders with the identifier
+    // fix; a recursive delete of an unvalidated path deserves its own guard.
     if task.path.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&task.path) {
-            warnings.push(format!("failed to remove task directory: {e}"));
+        if crate::validation::is_within(&task.path, &ctx.config.tasks_dir) {
+            if let Err(e) = std::fs::remove_dir_all(&task.path) {
+                warnings.push(format!("failed to remove task directory: {e}"));
+            }
+        } else {
+            warnings.push(format!(
+                "refused to remove task directory outside the tasks dir: {}",
+                task.path.display()
+            ));
         }
     }
 

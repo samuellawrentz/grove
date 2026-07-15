@@ -143,7 +143,7 @@ impl App {
     pub(crate) fn resolve_my_pane_id(verbose: bool) -> String {
         let my_pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
         if my_pane_id.is_empty() {
-            tmux::get_pane_id("", verbose).unwrap_or_default()
+            tmux::current_pane_id(verbose).unwrap_or_default()
         } else {
             my_pane_id
         }
