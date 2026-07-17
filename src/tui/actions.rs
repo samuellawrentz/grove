@@ -1,89 +1,21 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use edtui::{EditorEventHandler, EditorMode};
+use super::app::{App, Overlay, PendingShell};
 
-use crate::agent::{AgentDef, AgentFilter, AgentState, AGENT_REGISTRY};
-use crate::error::GroveError;
-use crate::tmux;
-
-use super::app::{App, Focus, Overlay, PendingShell, SidebarFocus};
-use super::flat_rows::FlatRows;
-
-/// Resolve the launch command for an agent `launch_key` (e.g. 'c','o','x','u')
-/// via the registry + config overrides. Returns `None` for unknown keys.
-fn launch_for_key(app: &App, key: char) -> Option<String> {
-    AGENT_REGISTRY
-        .iter()
-        .find(|d| d.launch_key == key)
-        .map(|d| app.config.resolved_agent_command(d.wire_name))
-}
-
-/// Handle a key event in the TUI.
+/// Handle a key event in the recents launcher.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
-    app.ui.last_interaction = std::time::Instant::now();
-    app.ui.status_message = None;
+    app.status_message = None;
 
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    // Ctrl-C always quits
+    // Ctrl-C always quits.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
         return;
     }
 
-    // Notepad focused: pass keys to edtui, Esc/q in normal mode returns focus to sidebar
-    if app.ui.focus == Focus::Notepad {
-        let note = &mut app.notepad;
-        enum NoteAction {
-            Unfocus,
-            Send(String),
-            Forward,
-        }
-        let action = match (&note.editor.mode, key.code) {
-            (EditorMode::Normal, KeyCode::Esc) | (EditorMode::Normal, KeyCode::Char('q')) => {
-                NoteAction::Unfocus
-            }
-            (EditorMode::Visual, KeyCode::Enter) => {
-                let text = note
-                    .editor
-                    .selection
-                    .as_ref()
-                    .map(|sel| sel.copy_from(&note.editor.lines).to_string())
-                    .unwrap_or_default();
-                note.editor.mode = EditorMode::Normal;
-                note.editor.selection = None;
-                NoteAction::Send(text)
-            }
-            _ => NoteAction::Forward,
-        };
-        match action {
-            NoteAction::Unfocus => {
-                app.ui.focus = Focus::Sidebar;
-                app.save_note();
-            }
-            NoteAction::Send(text) => {
-                if !text.is_empty() {
-                    if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                        let _ = tmux::send_keys(&pane_id, &text, app.verbose);
-                        app.ui.status_message = Some("Sent to pane".to_string());
-                    }
-                }
-            }
-            NoteAction::Forward => {
-                EditorEventHandler::default().on_key_event(key, &mut app.notepad.editor);
-            }
-        }
-        return;
-    }
-
-    // Input-capture overlays: each is matched in exactly one place.
-    match std::mem::replace(&mut app.ui.overlay, Overlay::None) {
-        Overlay::Search { mut query, target } => {
-            handle_search_key(app, key, &mut query, target);
-            return;
-        }
-        Overlay::Prompt(mut input) => {
-            handle_prompt_key(app, key, &mut input);
+    // Input-capture overlays take the key first.
+    match std::mem::replace(&mut app.overlay, Overlay::None) {
+        Overlay::Search(mut query) => {
+            handle_search_key(app, key, &mut query);
             return;
         }
         Overlay::OpenChoice { dir } => {
@@ -93,536 +25,98 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         Overlay::None => {}
     }
 
-    // Global keys (work in both panes)
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
-            app.should_quit = true;
-            return;
-        }
-        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.ui.sidebar_focus = SidebarFocus::Tree;
-            return;
-        }
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.ui.sidebar_focus = SidebarFocus::Projects;
-            return;
-        }
-        KeyCode::Char('j')
-            if app.preview.diff_mode && key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            if let Some(ref mut ds) = app.preview.diff_state {
-                ds.move_down_by(10);
+        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('j') | KeyCode::Down => move_cursor(app, true),
+        KeyCode::Char('k') | KeyCode::Up => move_cursor(app, false),
+        KeyCode::Char('g') => app.cursor = 0,
+        KeyCode::Char('G') => app.cursor = app.filtered_indices().len().saturating_sub(1),
+        KeyCode::Char('/') => app.overlay = Overlay::Search(String::new()),
+        // (a) Enter → new Claude workspace at the selected recent.
+        KeyCode::Enter => {
+            if let Some(dir) = app.selected_dir() {
+                let cmd = app.claude_cmd();
+                app.launch_workspace(&dir, Some(&cmd));
             }
-            return;
         }
-        KeyCode::Char('k')
-            if app.preview.diff_mode && key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            if let Some(ref mut ds) = app.preview.diff_state {
-                ds.move_up_by(10);
-            }
-            return;
-        }
-        KeyCode::Char('j') | KeyCode::Char('J') if app.preview.diff_mode => {
-            if let Some(ref mut ds) = app.preview.diff_state {
-                ds.move_down();
-            }
-            return;
-        }
-        KeyCode::Char('k') | KeyCode::Char('K') if app.preview.diff_mode => {
-            if let Some(ref mut ds) = app.preview.diff_state {
-                ds.move_up();
-            }
-            return;
-        }
-        KeyCode::Char('J') => {
-            app.preview.scroll_up = app.preview.scroll_up.saturating_sub(3);
-            return;
-        }
-        KeyCode::Char('K') => {
-            app.preview.scroll_up = app.preview.scroll_up.saturating_add(3);
-            return;
-        }
-        KeyCode::Char('w') if app.preview.diff_mode => {
-            if let Some(ref mut ds) = app.preview.diff_state {
-                ds.toggle_expand();
-            }
-            return;
-        }
-        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.tree.agent_filter = match &app.tree.agent_filter {
-                AgentFilter::AnyAgent => AgentFilter::Others,
-                AgentFilter::Others => AgentFilter::AnyAgent,
-            };
-            app.tree.jump_first_pane();
-            update_scroll(app);
-            app.refresh_preview();
-            return;
-        }
-        KeyCode::Char('m') => {
-            if app.ui.show_notepad {
-                app.ui.focus = if app.ui.focus == Focus::Notepad {
-                    app.save_note();
-                    Focus::Sidebar
-                } else {
-                    Focus::Notepad
-                };
-            }
-            return;
-        }
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.ui.show_notepad = !app.ui.show_notepad;
-            if app.ui.show_notepad {
-                app.ui.focus = Focus::Notepad;
-            } else {
-                app.ui.focus = Focus::Sidebar;
-                app.save_note();
-            }
-            return;
-        }
-        KeyCode::Char('d') => {
-            app.preview.diff_mode = !app.preview.diff_mode;
-            app.preview.scroll_up = 0;
-            app.refresh_preview();
-            return;
-        }
-        KeyCode::Char('/') => {
-            app.ui.overlay = Overlay::Search {
-                query: String::new(),
-                target: app.ui.sidebar_focus,
-            };
-            return;
-        }
-        KeyCode::Char('o') => {
-            app.pending_shell = PendingShell::FzfPicker;
-            return;
-        }
+        // (c) `o` → fzf directory picker → OpenChoice overlay.
+        KeyCode::Char('o') => app.pending_shell = PendingShell::FzfPicker,
+        // (b) `n` → interactive `grove init -i`, then build its workspace.
+        KeyCode::Char('n') => app.pending_shell = PendingShell::NewTask,
         _ => {}
     }
+}
 
-    // Dispatch to focused pane
-    match app.ui.sidebar_focus {
-        SidebarFocus::Tree => handle_tree_key(app, key),
-        SidebarFocus::Projects => handle_projects_key(app, key),
+fn move_cursor(app: &mut App, down: bool) {
+    let len = app.filtered_indices().len();
+    if down {
+        if app.cursor + 1 < len {
+            app.cursor += 1;
+        }
+    } else {
+        app.cursor = app.cursor.saturating_sub(1);
     }
 }
 
-/// Handle a key while the Search overlay is active. On exit the overlay stays
-/// `None`; otherwise it is re-armed with the (possibly mutated) query.
-fn handle_search_key(app: &mut App, key: KeyEvent, query: &mut String, target: SidebarFocus) {
-    use crossterm::event::KeyCode;
-
-    match target {
-        SidebarFocus::Tree => match key.code {
-            KeyCode::Enter => {
-                if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                    let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-                    app.should_quit = app.popup;
-                }
-                app.tree.search_filter = None;
-            }
-            KeyCode::Esc => {
-                app.tree.search_filter = None;
-            }
-            KeyCode::Down => {
-                app.tree.move_cursor_to_pane(true);
-                update_scroll(app);
-                app.refresh_preview();
-                rearm_search(app, query, target);
-            }
-            KeyCode::Up => {
-                app.tree.move_cursor_to_pane(false);
-                update_scroll(app);
-                app.refresh_preview();
-                rearm_search(app, query, target);
-            }
-            KeyCode::Char(c) => {
-                query.push(c);
-                app.tree.search_filter = Some(query.clone());
-                app.tree.jump_first_pane();
-                update_scroll(app);
-                app.refresh_preview();
-                rearm_search(app, query, target);
-            }
-            KeyCode::Backspace => {
-                query.pop();
-                app.tree.search_filter = if query.is_empty() {
-                    None
-                } else {
-                    Some(query.clone())
-                };
-                app.tree.jump_first_pane();
-                update_scroll(app);
-                app.refresh_preview();
-                rearm_search(app, query, target);
-            }
-            _ => rearm_search(app, query, target),
-        },
-        SidebarFocus::Projects => match key.code {
-            KeyCode::Enter => {
-                let indices = app.filtered_project_indices();
-                if !indices.is_empty() {
-                    let real_idx = indices[app.projects.cursor.min(indices.len() - 1)];
-                    let dir = app.projects.list[real_idx]
-                        .path
-                        .to_string_lossy()
-                        .to_string();
-                    let cmd = format!("{} -c", app.default_agent_command);
-                    app.projects.search_filter = None;
-                    launch_in_new_window(app, &dir, Some(&cmd));
-                }
-                app.projects.search_filter = None;
-            }
-            KeyCode::Esc => {
-                app.projects.search_filter = None;
-            }
-            KeyCode::Down => {
-                let max = app.filtered_project_indices().len();
-                if app.projects.cursor + 1 < max {
-                    app.projects.cursor += 1;
-                }
-                rearm_search(app, query, target);
-            }
-            KeyCode::Up => {
-                app.projects.cursor = app.projects.cursor.saturating_sub(1);
-                rearm_search(app, query, target);
-            }
-            KeyCode::Char(c) => {
-                query.push(c);
-                app.projects.search_filter = Some(query.clone());
-                app.projects.cursor = 0;
-                rearm_search(app, query, target);
-            }
-            KeyCode::Backspace => {
-                query.pop();
-                app.projects.search_filter = if query.is_empty() {
-                    None
-                } else {
-                    Some(query.clone())
-                };
-                app.projects.cursor = 0;
-                rearm_search(app, query, target);
-            }
-            _ => rearm_search(app, query, target),
-        },
-    }
-}
-
-/// Re-arm the Search overlay with the current query/target (it was taken out
-/// by the `mem::replace` in `handle_key`).
-fn rearm_search(app: &mut App, query: &str, target: SidebarFocus) {
-    app.ui.overlay = Overlay::Search {
-        query: query.to_string(),
-        target,
-    };
-}
-
-/// Handle a key while the Prompt overlay is active.
-fn handle_prompt_key(app: &mut App, key: KeyEvent, input: &mut String) {
-    use crossterm::event::KeyCode;
-
+/// Search over recents. Enter launches Claude at the selected match.
+fn handle_search_key(app: &mut App, key: KeyEvent, query: &mut String) {
     match key.code {
         KeyCode::Enter => {
-            let text = input.clone();
-            if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                if !text.is_empty() {
-                    let _ = tmux::send_keys(&pane_id, &text, app.verbose);
-                    app.refresh_tree();
-                }
+            if let Some(dir) = app.selected_dir() {
+                let cmd = app.claude_cmd();
+                app.search = None;
+                app.launch_workspace(&dir, Some(&cmd));
             }
+            app.search = None;
         }
-        KeyCode::Esc => {}
+        KeyCode::Esc => app.search = None,
+        KeyCode::Down => {
+            move_cursor(app, true);
+            rearm_search(app, query);
+        }
+        KeyCode::Up => {
+            move_cursor(app, false);
+            rearm_search(app, query);
+        }
         KeyCode::Char(c) => {
-            input.push(c);
-            app.ui.overlay = Overlay::Prompt(input.clone());
+            query.push(c);
+            app.search = Some(query.clone());
+            app.cursor = 0;
+            rearm_search(app, query);
         }
         KeyCode::Backspace => {
-            input.pop();
-            app.ui.overlay = Overlay::Prompt(input.clone());
+            query.pop();
+            app.search = if query.is_empty() {
+                None
+            } else {
+                Some(query.clone())
+            };
+            app.cursor = 0;
+            rearm_search(app, query);
         }
-        _ => {
-            app.ui.overlay = Overlay::Prompt(input.clone());
-        }
+        _ => rearm_search(app, query),
     }
 }
 
-/// Handle a key in the open-prompt sub-choice (a directory was picked by fzf,
-/// now choosing what to launch in it).
+fn rearm_search(app: &mut App, query: &str) {
+    app.overlay = Overlay::Search(query.to_string());
+}
+
+/// A directory was picked; choose what to run in a new workspace.
 fn handle_open_choice_key(app: &mut App, key: KeyEvent, dir: String) {
-    use crossterm::event::KeyCode;
-
-    match key.code {
-        KeyCode::Char(c @ ('c' | 'o' | 'x' | 'u')) => {
-            if let Some(cmd) = launch_for_key(app, c) {
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-        }
-        KeyCode::Char('t') => {
-            launch_in_new_window(app, &dir, None);
-        }
-        KeyCode::Char('e') => {
-            launch_in_new_window(app, &dir, Some("nvim ."));
-        }
+    let claude = app.claude_cmd();
+    let cmd: Option<&str> = match key.code {
+        KeyCode::Char('c') => Some(claude.as_str()),
+        KeyCode::Char('t') => None,          // plain shell
+        KeyCode::Char('e') => Some("nvim ."),
         KeyCode::Esc => {
-            // cancelled
+            return; // cancelled
         }
         _ => {
-            // unrecognized key: keep the overlay open awaiting a valid choice
-            app.ui.overlay = Overlay::OpenChoice { dir };
-        }
-    }
-}
-
-/// Respond to a Waiting agent on the selected pane by sending its registry
-/// keys (accept or reject), then refresh. `select_keys` picks the keys off the
-/// agent's `AgentDef`; `default` is used for an agent kind not in the registry.
-fn respond_to_agent(
-    app: &mut App,
-    select_keys: impl Fn(&AgentDef) -> &'static [&'static str],
-    default: &'static [&'static str],
-) {
-    if let Some(pane) = app.tree.selected_pane() {
-        if pane
-            .agent
-            .as_ref()
-            .is_some_and(|a| a.state == AgentState::Waiting)
-        {
-            let keys: &[&str] = pane
-                .agent
-                .as_ref()
-                .and_then(|a| AGENT_REGISTRY.iter().find(|d| d.kind == a.kind))
-                .map(select_keys)
-                .unwrap_or(default);
-            let _ = tmux::send_raw_keys(&pane.pane_info.pane_id, keys, app.verbose);
-            app.refresh_tree();
-        }
-    }
-}
-
-fn handle_tree_key(app: &mut App, key: KeyEvent) {
-    use crossterm::event::KeyCode;
-
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.tree.move_cursor_to_pane(true);
-            update_scroll(app);
-            app.preview.scroll_up = 0;
-            app.sync_note_to_group();
-            app.refresh_preview();
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.tree.move_cursor_to_pane(false);
-            update_scroll(app);
-            app.preview.scroll_up = 0;
-            app.sync_note_to_group();
-            app.refresh_preview();
-        }
-        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
-            app.tree.collapse_current_group();
-            update_scroll(app);
-        }
-        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
-            app.tree.expand_current_group();
-            update_scroll(app);
-            app.refresh_preview();
-        }
-        KeyCode::Enter => {
-            if let Some(pane_id) = app.tree.selected_pane_id().map(|s| s.to_string()) {
-                let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-                app.should_quit = app.popup;
-            }
-        }
-        KeyCode::Char('a') => respond_to_agent(app, |d| d.accept_keys, &["Enter"]),
-        KeyCode::Char('r') => respond_to_agent(app, |d| d.reject_keys, &["n", "Enter"]),
-        KeyCode::Char('s') if app.tree.selected_pane().is_some() => {
-            app.ui.overlay = Overlay::Prompt(String::new());
-        }
-        KeyCode::Char('x') => {
-            if let Some(pane) = app.tree.selected_pane() {
-                let pane_id = pane.pane_info.pane_id.clone();
-                let _ = tmux::kill_pane(&pane_id, app.verbose);
-                app.refresh_tree();
-                app.refresh_preview();
-            }
-        }
-        KeyCode::Char('n') => {
-            app.pending_shell = PendingShell::Popup("grove init -i".to_string());
-        }
-        KeyCode::Char('e') => {
-            if let Some((target, cwd)) = selected_target_cwd(app) {
-                launch_split(app, &target, &cwd, Some("nvim ."));
-            }
-        }
-        // Split-launch an agent: C/O/X/U map to the registry launch_key (lowercased).
-        KeyCode::Char(c @ ('C' | 'O' | 'X' | 'U')) => {
-            if let Some(cmd) = launch_for_key(app, c.to_ascii_lowercase()) {
-                if let Some((target, cwd)) = selected_target_cwd(app) {
-                    launch_split(app, &target, &cwd, Some(&cmd));
-                }
-            }
-        }
-        KeyCode::Char('T') => {
-            if let Some((target, cwd)) = selected_target_cwd(app) {
-                launch_split(app, &target, &cwd, None);
-            }
-        }
-        KeyCode::Char('M') => {
-            if let Some(pane) = app.tree.selected_pane() {
-                let pane_id = pane.pane_info.pane_id.clone();
-                let result = if pane.forced_other {
-                    app.db.unmark_pane_other(&pane_id)
-                } else {
-                    app.db.mark_pane_other(&pane_id)
-                };
-                if let Err(e) = result {
-                    app.ui.status_message = Some(format!("Mark error: {e}"));
-                }
-                app.refresh_tree();
-                app.refresh_preview();
-            }
-        }
-        KeyCode::Char('g') => {
-            app.tree.jump_first_pane();
-            update_scroll(app);
-            app.refresh_preview();
-        }
-        KeyCode::Char('G') => {
-            app.tree.jump_last_pane();
-            update_scroll(app);
-            app.refresh_preview();
-        }
-        _ => {}
-    }
-}
-
-fn handle_projects_key(app: &mut App, key: KeyEvent) {
-    use crossterm::event::KeyCode;
-
-    let indices = app.filtered_project_indices();
-    if indices.is_empty() {
-        return;
-    }
-
-    // Resolve the real project index from the display cursor
-    let real_idx = |app: &App| {
-        let idxs = app.filtered_project_indices();
-        if idxs.is_empty() {
-            None
-        } else {
-            Some(idxs[app.projects.cursor.min(idxs.len() - 1)])
+            // Unrecognized: keep the overlay open awaiting a valid choice.
+            app.overlay = Overlay::OpenChoice { dir };
+            return;
         }
     };
-
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down if app.projects.cursor + 1 < indices.len() => {
-            app.projects.cursor += 1;
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.projects.cursor = app.projects.cursor.saturating_sub(1);
-        }
-        KeyCode::Char('c') | KeyCode::Enter => {
-            if let Some(idx) = real_idx(app) {
-                let dir = app.projects.list[idx].path.to_string_lossy().to_string();
-                let cmd = format!("{} -c", app.default_agent_command);
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-        }
-        KeyCode::Char('n') => {
-            if let Some(idx) = real_idx(app) {
-                let dir = app.projects.list[idx].path.to_string_lossy().to_string();
-                let cmd = app.default_agent_command.clone();
-                launch_in_new_window(app, &dir, Some(&cmd));
-            }
-        }
-        KeyCode::Char('t') => {
-            if let Some(idx) = real_idx(app) {
-                let dir = app.projects.list[idx].path.to_string_lossy().to_string();
-                launch_in_new_window(app, &dir, None);
-            }
-        }
-        KeyCode::Char('x') => {
-            if let Some(idx) = real_idx(app) {
-                let path = app.projects.list[idx].path.to_string_lossy().to_string();
-                let _ = app.db.delete_project(&path);
-                app.refresh_projects();
-                let new_len = app.filtered_project_indices().len();
-                if app.projects.cursor >= new_len {
-                    app.projects.cursor = new_len.saturating_sub(1);
-                }
-            }
-        }
-        KeyCode::Char('g') => {
-            app.projects.cursor = 0;
-        }
-        KeyCode::Char('G') => {
-            app.projects.cursor = indices.len().saturating_sub(1);
-        }
-        _ => {}
-    }
-}
-
-/// Get target pane ID and cwd from the selected pane or group header.
-fn selected_target_cwd(app: &App) -> Option<(String, String)> {
-    if let Some(pane) = app.tree.selected_pane() {
-        let cwd = pane.pane_info.current_path.to_string_lossy().to_string();
-        let target = pane.pane_info.pane_id.clone();
-        Some((target, cwd))
-    } else if let Some(group) = app.tree.selected_group() {
-        group.panes.first().map(|first_pane| {
-            let cwd = group.path.to_string_lossy().to_string();
-            let target = first_pane.pane_info.pane_id.clone();
-            (target, cwd)
-        })
-    } else if app.ui.sidebar_focus == SidebarFocus::Projects {
-        let indices = app.filtered_project_indices();
-        indices
-            .get(app.projects.cursor)
-            .and_then(|&idx| app.projects.list.get(idx))
-            .map(|proj| {
-                let path = proj.path.to_string_lossy().to_string();
-                ("new-window".to_string(), path)
-            })
-    } else {
-        None
-    }
-}
-
-/// Switch to a freshly-launched pane (quitting in popup mode), or surface the
-/// launch failure under `what` (e.g. "split", "new window"). Shared tail of the
-/// split/new-window launchers, which differ only in the tmux call.
-fn switch_after_launch(app: &mut App, launched: Result<String, GroveError>, what: &str) {
-    match launched {
-        Ok(pane_id) => {
-            let _ = tmux::switch_to_pane(&pane_id, app.verbose);
-            app.should_quit = app.popup;
-        }
-        Err(e) => {
-            app.ui.status_message = Some(format!("{what} failed: {e}"));
-        }
-    }
-}
-
-/// Split a window and switch to it.
-fn launch_split(app: &mut App, target: &str, cwd: &str, cmd: Option<&str>) {
-    let launched = tmux::split_window(target, cwd, cmd, app.verbose);
-    switch_after_launch(app, launched, "split");
-}
-
-/// Create a new tmux window and switch to it.
-fn launch_in_new_window(app: &mut App, dir: &str, cmd: Option<&str>) {
-    let launched = tmux::new_window(dir, cmd, app.verbose);
-    switch_after_launch(app, launched, "new window");
-}
-
-/// Keep scroll_offset in sync with cursor position.
-fn update_scroll(app: &mut App) {
-    let visible_height = crossterm::terminal::size()
-        .map(|(_, h)| (h as usize).saturating_sub(4))
-        .unwrap_or(20);
-
-    if app.tree.cursor < app.tree.scroll_offset {
-        app.tree.scroll_offset = app.tree.cursor;
-    } else if app.tree.cursor >= app.tree.scroll_offset + visible_height {
-        app.tree.scroll_offset = app.tree.cursor - visible_height + 1;
-    }
+    app.launch_workspace(&dir, cmd);
 }

@@ -1,5 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::collections::HashSet;
 
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -37,120 +36,103 @@ pub(crate) fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> Result<(), GroveError> {
-    // Register SIGUSR1 handler for tmux hook refresh
-    let sigusr1_flag = Arc::new(AtomicBool::new(false));
-    #[cfg(unix)]
-    {
-        let _ =
-            signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&sigusr1_flag));
-    }
-
-    // Paint one frame from the cheaply-constructed state BEFORE the blocking
-    // initial refresh, so startup is not perceived as a hang. No key is read
-    // until after this completes (the input poll lives inside the loop below).
-    terminal
-        .draw(|f| ui::draw(f, &mut *app))
-        .map_err(|e| GroveError::Tui(format!("draw error: {e}")))?;
-    app.initial_refresh();
-
     loop {
-        // Draw
         terminal
-            .draw(|f| ui::draw(f, &mut *app))
+            .draw(|f| ui::draw(f, app))
             .map_err(|e| GroveError::Tui(format!("draw error: {e}")))?;
 
         if app.should_quit {
             break;
         }
 
-        // Poll for events with adaptive timeout
         let timeout = app.poll_timeout();
         let has_event =
             event::poll(timeout).map_err(|e| GroveError::Tui(format!("poll error: {e}")))?;
 
         if has_event {
-            let ev = event::read().map_err(|e| GroveError::Tui(format!("read error: {e}")))?;
-            match ev {
-                Event::Key(key) => {
-                    actions::handle_key(app, key);
-                }
-                Event::Resize(_, _) => {
-                    // Ratatui handles resize on next draw
-                }
-                _ => {}
+            if let Event::Key(key) = event::read()
+                .map_err(|e| GroveError::Tui(format!("read error: {e}")))?
+            {
+                actions::handle_key(app, key);
             }
         }
 
         // Drain a one-shot deferred shell side-effect: suspend TUI, run, resume.
         match std::mem::replace(&mut app.pending_shell, PendingShell::None) {
-            PendingShell::Popup(cmd) => {
-                suspend_tui(terminal, || {
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .status();
-
-                    match &status {
-                        Ok(s) if !s.success() => {
-                            eprintln!("\n[grove] command exited with {s}");
-                        }
-                        Err(e) => {
-                            eprintln!("\n[grove] command failed: {e}");
-                        }
-                        _ => {}
-                    }
-
-                    eprintln!("[grove] Press Enter to return to TUI...");
-                    let _ = std::io::stdin().read_line(&mut String::new());
-
-                    if let Err(e) = status {
-                        app.ui.status_message = Some(format!("command failed: {e}"));
-                    }
-                });
-
-                app.refresh_tree();
-                app.refresh_preview();
-            }
-            PendingShell::FzfPicker => {
-                // fzf directory picker → opens the open-prompt sub-choice overlay
-                let result = suspend_tui(terminal, || {
-                    std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg("{ grove list --json 2>/dev/null | jq -r '.tasks[].path // empty' 2>/dev/null; zoxide query -l 2>/dev/null; } | awk '!seen[$0]++' | fzf --prompt='Directory> '")
-                        .stdin(std::process::Stdio::inherit())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::inherit())
-                        .output()
-                });
-
-                if let Ok(output) = result {
-                    if output.status.success() {
-                        let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if !dir.is_empty() {
-                            app.ui.overlay = Overlay::OpenChoice { dir };
-                        }
-                    }
-                }
-
-                app.refresh_tree();
-                app.refresh_preview();
-            }
+            PendingShell::FzfPicker => run_fzf_picker(terminal, app),
+            PendingShell::NewTask => run_new_task(terminal, app),
             PendingShell::None => {}
         }
 
-        // Background refresh is gated on no input-capturing surface (overlay or
-        // notepad) so a tmux hook firing mid-typing can't rebuild the tree and
-        // yank the cursor.
-        if !has_event && app.should_background_refresh() {
-            // Timeout: refresh data
-            app.on_tick();
-        }
-
-        // Check SIGUSR1 flag (also gated on input-capturing surfaces)
-        if sigusr1_flag.swap(false, Ordering::Relaxed) && app.should_background_refresh() {
-            app.refresh_tree();
+        // Idle tick: refresh recents so externally-created tasks show up.
+        if !has_event && !app.overlay_active() {
+            app.load_recents();
         }
     }
 
     Ok(())
+}
+
+/// fzf over recent dirs (grove tasks + zoxide) → opens the OpenChoice overlay.
+fn run_fzf_picker(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
+    let result = suspend_tui(terminal, || {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("{ grove list --json 2>/dev/null | jq -r '.tasks[].path // empty' 2>/dev/null; zoxide query -l 2>/dev/null; } | awk '!seen[$0]++' | fzf --prompt='Directory> '")
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .output()
+    });
+
+    if let Ok(output) = result {
+        if output.status.success() {
+            let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !dir.is_empty() {
+                app.overlay = Overlay::OpenChoice { dir };
+            }
+        }
+    }
+}
+
+/// (b) Suspend and run interactive `grove init -i` (task name + repos + branch),
+/// then build one herdr workspace for whatever task it created.
+fn run_new_task(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
+    let before: HashSet<String> = app
+        .db
+        .list_tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+
+    suspend_tui(terminal, || {
+        let status = std::process::Command::new("grove")
+            .args(["init", "-i"])
+            .status();
+        if let Err(e) = status {
+            eprintln!("\n[grove] init failed: {e}");
+            eprintln!("[grove] Press Enter to return...");
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
+    });
+
+    // The subprocess committed to the same DB; find the task it created.
+    app.load_recents();
+    let new_task = app
+        .db
+        .list_tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| !before.contains(&t.id));
+
+    let Some(task) = new_task else {
+        app.status_message = Some("No new task created".to_string());
+        return;
+    };
+
+    match app.launch_task_workspace(&task) {
+        Ok(()) => app.should_quit = app.popup,
+        Err(e) => app.status_message = Some(format!("workspace build failed: {e}")),
+    }
 }
