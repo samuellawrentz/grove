@@ -1,12 +1,11 @@
-mod agent;
 mod cli;
 mod commands;
 mod config;
 mod db;
 mod error;
 mod git;
+mod herdr;
 mod output;
-mod tmux;
 mod transcript;
 mod tui;
 mod validation;
@@ -59,11 +58,6 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             branch,
             base,
             interactive,
-            no_tmux,
-            no_claude,
-            no_agent,
-            agent,
-            no_attach,
         } => {
             let opts = commands::init::InitOptions {
                 repos: &repos,
@@ -71,11 +65,6 @@ fn run(cli: Cli) -> Result<(), GroveError> {
                 branch: branch.as_deref(),
                 base: base.as_deref(),
                 interactive,
-                no_tmux,
-                no_claude,
-                no_agent,
-                no_attach,
-                agent: agent.as_deref(),
             };
             commands::init::run(task_id.as_deref(), &opts, &ctx)?;
         }
@@ -120,29 +109,9 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             tools,
         } => commands::run::run(&task_id, &prompt, brief, timeout, max_chars, tools, &ctx)?,
         Commands::Tui { popup } => {
-            if !tmux::is_tmux_available() {
-                return Err(GroveError::TmuxNotRunning("tmux is not installed".into()));
-            }
-            if !tmux::is_inside_tmux() {
-                return Err(GroveError::TmuxNotRunning(
-                    "grove tui must be run inside tmux".into(),
-                ));
-            }
             // `ctx` is unused in this arm; NLL ends its borrow of config + db
-            // here, so they can be moved into the TUI which owns them — no
-            // second Db::open / config reload.
+            // here, so they can be moved into the TUI which owns them.
             tui::run(config, db, verbose, popup)?;
-        }
-        Commands::ProjectTouch { path } => {
-            ctx.db.upsert_project(&path)?;
-        }
-        Commands::Compose { target } => {
-            if !tmux::is_inside_tmux() {
-                return Err(GroveError::TmuxNotRunning(
-                    "grove compose must be run inside tmux".into(),
-                ));
-            }
-            commands::compose::run(target.as_deref())?;
         }
         Commands::Add {
             task_id,

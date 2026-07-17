@@ -97,19 +97,6 @@ impl<'a> StepJournal<'a> {
         });
     }
 
-    /// A tmux window was launched; the undo kills it.
-    pub fn tmux_window(&mut self, target: &str) {
-        let target = target.to_string();
-        let verbose = self.verbose;
-        self.defer(move || {
-            log_undo(
-                verbose,
-                "kill tmux window",
-                crate::tmux::kill_window(&target, verbose),
-            );
-        });
-    }
-
     /// Disarm: every side-effect succeeded and was durably recorded, so nothing
     /// is undone when the journal drops.
     pub fn commit(mut self) {

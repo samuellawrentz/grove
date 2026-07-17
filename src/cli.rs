@@ -91,21 +91,6 @@ pub enum Commands {
         /// Interactive mode: select repos and branch from prompts
         #[arg(short, long)]
         interactive: bool,
-        /// Skip tmux session creation (default in Phase 1)
-        #[arg(long)]
-        no_tmux: bool,
-        /// Skip Claude launch (default in Phase 1)
-        #[arg(long)]
-        no_claude: bool,
-        /// Skip all agent launches
-        #[arg(long)]
-        no_agent: bool,
-        /// Which agent to launch (overrides default)
-        #[arg(long)]
-        agent: Option<String>,
-        /// Skip auto-attach to tmux window
-        #[arg(long)]
-        no_attach: bool,
     },
 
     /// Close a task and remove its worktrees
@@ -127,7 +112,7 @@ pub enum Commands {
     /// List active tasks
     List,
 
-    /// Attach to a task's tmux window
+    /// Focus a task's herdr workspace
     Attach {
         /// Task identifier
         #[arg(add = ArgValueCandidates::new(complete_tasks))]
@@ -206,25 +191,11 @@ pub enum Commands {
         tools: bool,
     },
 
-    /// Interactive TUI pane manager
+    /// Recents launcher: create herdr workspaces
     Tui {
-        /// Quit after launching a pane (for tmux popup usage)
+        /// Quit after launching a workspace (for popup usage)
         #[arg(long)]
         popup: bool,
-    },
-
-    /// Register a directory path as a project (used by tmux hooks)
-    #[clap(hide = true)]
-    ProjectTouch {
-        /// Directory path to register as project
-        path: String,
-    },
-
-    /// Open editor to compose and send text to a tmux pane
-    Compose {
-        /// Target pane ID (default: pane above the current one)
-        #[arg(long)]
-        target: Option<String>,
     },
 
     /// Add a repo to an existing task

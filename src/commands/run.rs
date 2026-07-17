@@ -13,11 +13,6 @@ use crate::error::GroveError;
 use crate::output;
 use crate::transcript::ReadOpts;
 
-/// How long to allow for the agent to pick up the keystrokes and start its turn
-/// before concluding that an idle state means "finished" rather than "not yet
-/// started". See `wait::is_settled`.
-const SETTLE: Duration = Duration::from_secs(15);
-
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     task_id: &str,
@@ -32,16 +27,27 @@ pub fn run(
 
     let (task, pane_id) = send::deliver(task_id, prompt, brief, ctx)?;
 
+    // Confirm the turn actually started before waiting for it to finish. The
+    // agent is `idle` at the instant we send; if we jump straight to
+    // `wait --status idle` it returns on that stale idle and we read the
+    // PREVIOUS turn. Block until the agent flips to `working` (bounded), then
+    // wait for it to settle. A timeout here is fine — a trivial/no-op turn may
+    // never be observed as `working`.
+    if let Err(e) = crate::herdr::wait(&pane_id, "working", 15_000) {
+        if !matches!(e, GroveError::Timeout(_)) {
+            return Err(e);
+        }
+    }
+
     let settled = wait::wait_for(
         std::slice::from_ref(&task.id),
         false,
         Duration::from_secs(timeout_secs),
-        SETTLE,
         ctx,
     )?;
     let state = settled
         .first()
-        .map(|s| s.state.to_string())
+        .map(|s| s.state.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
     let opts = ReadOpts {

@@ -60,6 +60,14 @@ pub fn run(
 
     let all_repos = db.list_repos()?;
 
+    // Resolve the task's herdr workspace by cwd BEFORE removing worktrees (the
+    // cwd match needs the directory to still exist). Closed best-effort below.
+    let workspace_id = task
+        .repos
+        .first()
+        .and_then(|r| crate::herdr::resolve_agent_for_cwd(&r.worktree_path).ok().flatten())
+        .and_then(|a| a.workspace_id);
+
     // Partial-failure safety (S4): on the non-force path, confirm every worktree
     // is gone BEFORE destroying anything else (tmux window, task dir, DB row).
     // A non-force removal failure (e.g. a locked worktree) aborts the whole close
@@ -105,10 +113,12 @@ pub fn run(
         }
     }
 
-    if let Some(ref target) = task.tmux_window {
-        if let Err(e) = crate::tmux::kill_window(target, verbose) {
+    // Best-effort: close the task's herdr workspace if we resolved one. Ignore
+    // errors — the git worktree teardown is what close guarantees.
+    if let Some(ref ws) = workspace_id {
+        if let Err(e) = crate::herdr::close_workspace(ws) {
             if verbose {
-                eprintln!("Warning: failed to kill tmux window: {e}");
+                eprintln!("Warning: failed to close herdr workspace '{ws}': {e}");
             }
         }
     }
@@ -197,17 +207,6 @@ pub fn run(
     }
 
     db.delete_task(task_id)?;
-
-    // Clean up the task's tmux pane bookkeeping so a recycled pane id can't
-    // resurrect this task's agent kind or "others" mark.
-    if let Some(pid) = task.pane_id.as_deref() {
-        if let Err(e) = crate::agent::PaneAgentStore::new(db).remove(pid) {
-            warnings.push(format!("failed to clear pane agent for '{pid}': {e}"));
-        }
-        if let Err(e) = db.unmark_pane_other(pid) {
-            warnings.push(format!("failed to unmark pane '{pid}': {e}"));
-        }
-    }
 
     let data = serde_json::json!({
         "task_id": task_id,

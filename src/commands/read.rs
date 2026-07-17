@@ -1,6 +1,9 @@
 //! Read what an agent *said*, from its transcript.
+//!
+//! Critically, this reads the Claude JSONL transcript on disk, not herdr's
+//! screen. The transcript is resolved by convention from the task's PRIMARY
+//! worktree cwd (the first repo), independent of any live pane.
 
-use crate::agent;
 use crate::commands::Ctx;
 use crate::db::TaskEntry;
 use crate::error::GroveError;
@@ -8,23 +11,16 @@ use crate::output;
 use crate::transcript::{self, Excerpt, ReadOpts};
 
 /// Find and read a task's transcript. Shared by `grove read` and `grove run`.
-pub fn excerpt_for(task: &TaskEntry, opts: &ReadOpts, ctx: &Ctx) -> Result<Excerpt, GroveError> {
-    let panes = crate::tmux::list_all_panes(ctx.verbose).unwrap_or_default();
-    let snapshots = agent::read_pane_snapshots().unwrap_or_default();
-
-    let snapshot = agent::locate_task_pane(task, &panes).and_then(|p| snapshots.get(&p.pane_id));
-
-    // The hook's recorded path wins; its cwd, then the task dir, are fallbacks
-    // for an agent launched before the hook learned to record transcripts.
-    let cwd = snapshot
-        .and_then(|s| s.cwd.clone())
+pub fn excerpt_for(task: &TaskEntry, opts: &ReadOpts, _ctx: &Ctx) -> Result<Excerpt, GroveError> {
+    let cwd = task
+        .repos
+        .first()
+        .map(|r| r.worktree_path.clone())
         .unwrap_or_else(|| task.path.clone());
-    let recorded = snapshot.and_then(|s| s.transcript.as_deref());
 
-    let path = transcript::resolve(recorded, &cwd).ok_or_else(|| {
+    let path = transcript::resolve(None, &cwd).ok_or_else(|| {
         GroveError::General(format!(
-            "no transcript found for task '{}' (looked for a recorded path, then \
-             under ~/.claude/projects/ for {}). Is the agent-tmux-status.sh hook wired up?",
+            "no transcript found for task '{}' (looked under ~/.claude/projects/ for {})",
             task.id,
             cwd.display()
         ))

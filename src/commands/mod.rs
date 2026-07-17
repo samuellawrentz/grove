@@ -10,7 +10,6 @@ pub struct Ctx<'a> {
 pub mod add;
 pub mod attach;
 pub mod close;
-pub mod compose;
 pub mod init;
 pub mod list;
 pub mod read;

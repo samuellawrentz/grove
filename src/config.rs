@@ -150,11 +150,10 @@ impl GroveConfig {
         if agent_name == "claude" {
             return self.claude_command.clone();
         }
-        crate::agent::AGENT_REGISTRY
-            .iter()
-            .find(|d| d.display_name.eq_ignore_ascii_case(agent_name))
-            .map(|d| d.default_command.to_string())
-            .unwrap_or_else(|| agent_name.to_string())
+        // Agent launching now lives in herdr; grove keeps this only so a
+        // configured override still resolves. With no override, the agent name
+        // is its own command.
+        agent_name.to_string()
     }
 
     /// Load config with precedence: file < env < cli overrides.
