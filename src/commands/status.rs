@@ -48,11 +48,13 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
             .map(|t| {
                 let (pane_id, agent_status) = live_agent(t, &agents);
                 let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
+                let dirs: Vec<&str> = t.repos.iter().map(|r| r.dir_name()).collect();
 
                 serde_json::json!({
                     "task_id": t.id,
                     "path": t.path,
                     "repos": repo_names,
+                    "dirs": dirs,
                     "branch": t.repos.first().map(|r| r.branch.as_str()).unwrap_or(""),
                     "pane_id": pane_id,
                     "agent_status": agent_status,
@@ -70,7 +72,7 @@ pub fn run(task_id: Option<&str>, ctx: &Ctx) -> Result<(), GroveError> {
 
         for t in &tasks {
             let (pane_id, agent_status) = live_agent(t, &agents);
-            let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
+            let repo_names: Vec<String> = t.repos.iter().map(|r| r.display_name()).collect();
             let branch = t.repos.first().map(|r| r.branch.as_str()).unwrap_or("");
             let pane_str = pane_id.as_deref().unwrap_or("-");
 

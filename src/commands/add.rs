@@ -10,6 +10,7 @@ pub fn run(
     repo_name: &str,
     branch: Option<&str>,
     base: Option<&str>,
+    dir: Option<&str>,
     ctx: &Ctx,
 ) -> Result<(), GroveError> {
     let db = ctx.db;
@@ -23,15 +24,28 @@ pub fn run(
     if let Some(b) = base {
         validate_identifier(b, "base")?;
     }
+    // The alias is a caller-supplied path segment joined onto the task dir, and
+    // close() later hands that path to remove_dir_all — same hazard class as the
+    // task-id, so it goes through the same single-component validation.
+    if let Some(d) = dir {
+        validate_identifier(d, "dir")?;
+    }
 
     let mut task = db
         .get_task(task_id)?
         .ok_or_else(|| GroveError::TaskNotFound(task_id.to_string()))?;
 
-    let already_in_task = task.repos.iter().any(|r| r.repo_name == repo_name);
-    if already_in_task {
+    // Without --dir the old rule stands: a repo goes into a task once. A second
+    // worktree of the same repo has to be asked for explicitly.
+    if dir.is_none() && task.repos.iter().any(|r| r.repo_name == repo_name) {
         return Err(GroveError::Conflict(format!(
             "repo '{repo_name}' is already in task '{task_id}'"
+        )));
+    }
+    let dir_name = dir.unwrap_or(repo_name);
+    if task.repos.iter().any(|r| r.dir_name() == dir_name) {
+        return Err(GroveError::Conflict(format!(
+            "task '{task_id}' already has a worktree at '{dir_name}'"
         )));
     }
 
@@ -39,7 +53,7 @@ pub fn run(
         .map(String::from)
         .or_else(|| task.repos.first().map(|r| r.branch.clone()))
         .unwrap_or_else(|| task_id.to_string());
-    let worktree_path = task.path.join(repo_name);
+    let worktree_path = task.path.join(dir_name);
 
     let repo_entry = db
         .get_repo(repo_name)?
@@ -73,12 +87,20 @@ pub fn run(
     let data = serde_json::json!({
         "task_id": task_id,
         "repo": repo_name,
+        "dir": dir_name,
         "worktree_path": worktree_path,
         "branch": branch_name,
     });
+    // Name the directory only when it is not the repo name, so the default
+    // message is byte-identical to what callers saw before --dir existed.
+    let at = if dir_name == repo_name {
+        String::new()
+    } else {
+        format!(" at '{dir_name}'")
+    };
     output::success(
         json_mode,
-        &format!("Added repo '{repo_name}' to task '{task_id}' (branch: {branch_name})"),
+        &format!("Added repo '{repo_name}' to task '{task_id}'{at} (branch: {branch_name})"),
         data,
     );
 

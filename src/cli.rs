@@ -212,5 +212,9 @@ pub enum Commands {
         /// Base branch to create worktree from
         #[arg(long)]
         base: Option<String>,
+        /// Worktree directory name (default: repo name); lets one task hold a
+        /// second worktree of a repo it already has
+        #[arg(long)]
+        dir: Option<String>,
     },
 }

@@ -415,6 +415,186 @@ fn add_rollback_worktree_on_tx_failure() {
     );
 }
 
+// ============================================================================
+// Aliased worktrees: two checkouts of ONE repo in a single task (`add --dir`)
+// ============================================================================
+
+/// Register `repo-a` and create TASK-1 holding one worktree of it.
+fn fixture_with_task_on_repo_a(fix: &TestFixture) {
+    let bare = fix.create_bare_repo("repo-a");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare.to_str().unwrap()])
+        .assert()
+        .success();
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a"])
+        .assert()
+        .success();
+}
+
+/// ALIAS-add: `--dir` puts a SECOND worktree of an already-added repo under its
+/// own directory, and list names the alias so the two are tellable apart.
+#[test]
+fn add_dir_creates_second_worktree_of_same_repo() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+
+    let output = fix
+        .grove_cmd()
+        .args([
+            "--json",
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--branch",
+            "pr-72",
+            "--dir",
+            "repo-a-pr72",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "aliased add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["repo"], "repo-a");
+    assert_eq!(json["dir"], "repo-a-pr72");
+    assert_eq!(json["branch"], "pr-72");
+
+    let task_dir = fix.tasks_dir.join("TASK-1");
+    assert!(task_dir.join("repo-a").exists(), "original worktree kept");
+    assert!(
+        task_dir.join("repo-a-pr72").join(".git").exists(),
+        "aliased worktree provisioned"
+    );
+
+    // Both rows survive the (task_id, worktree) key.
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_repos WHERE task_id = 'TASK-1' AND repo_name = 'repo-a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2, "task holds two worktrees of repo-a");
+
+    fix.grove_cmd()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repo-a-pr72 (repo-a)"));
+}
+
+/// ALIAS-close: `close --force` must reclaim EVERY worktree, aliased ones
+/// included — a leaked worktree would strand miller's gc.
+#[test]
+fn close_force_removes_aliased_worktrees() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+    fix.grove_cmd()
+        .args([
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--branch",
+            "pr-72",
+            "--dir",
+            "repo-a-pr72",
+        ])
+        .assert()
+        .success();
+
+    // Dirty the aliased worktree so only --force can close.
+    let task_dir = fix.tasks_dir.join("TASK-1");
+    std::fs::write(task_dir.join("repo-a-pr72").join("dirty.txt"), "x").unwrap();
+
+    fix.grove_cmd()
+        .args(["close", "TASK-1", "--force"])
+        .assert()
+        .success();
+
+    assert!(!task_dir.exists(), "task dir removed with both worktrees");
+
+    let bare = fix.repos_dir.join("repo-a.git");
+    let out = std::process::Command::new("git")
+        .args(["-C", bare.to_str().unwrap(), "worktree", "list"])
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !listed.contains("TASK-1"),
+        "git must not still track task worktrees: {listed}"
+    );
+}
+
+/// ALIAS-duplicate-guard: without `--dir` a repo still goes into a task exactly
+/// once, and an alias may not squat on a directory the task already uses.
+#[test]
+fn add_duplicate_worktree_dir_conflicts() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+    let bare_b = fix.create_bare_repo("repo-b");
+    fix.grove_cmd()
+        .args(["register", "repo-b", bare_b.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // No flag: unchanged behaviour, still a loud conflict.
+    let output = fix
+        .grove_cmd()
+        .args(["add", "TASK-1", "repo-a"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code().unwrap(), 6);
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("repo 'repo-a' is already in task 'TASK-1'"));
+
+    // An alias colliding with an existing worktree directory is refused too.
+    let output = fix
+        .grove_cmd()
+        .args(["add", "TASK-1", "repo-b", "--dir", "repo-a"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code().unwrap(), 6);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already has a worktree at 'repo-a'"));
+
+    // Neither attempt touched the original worktree.
+    assert!(fix.tasks_dir.join("TASK-1").join("repo-a").exists());
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_repos WHERE task_id = 'TASK-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+/// ALIAS-traversal: the alias is a caller-supplied path segment that close()
+/// later feeds to remove_dir_all, so it goes through the same validation that
+/// stopped `grove init ..` from arming a delete on $HOME.
+#[test]
+fn add_rejects_traversal_dir() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+
+    for bad in ["..", ".", "../evil", "sub/dir", "/abs"] {
+        fix.grove_cmd()
+            .args(["add", "TASK-1", "repo-a", "--dir", bad])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid dir"));
+    }
+
+    // Nothing was provisioned outside the task dir.
+    assert!(!fix.tasks_dir.join("evil").exists());
+    assert!(fix.tasks_dir.join("TASK-1").join("repo-a").exists());
+}
+
 /// PROVISION-rollback-equiv (init): a worktree provisioned on a *pre-existing*
 /// branch must NOT be force-deleted on rollback — only the worktree is removed.
 /// Pins the `created_branch.then_some(..)` discriminator that the shared helper

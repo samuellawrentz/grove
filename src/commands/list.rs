@@ -40,6 +40,7 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
             .map(|t| {
                 let exists = !t.is_stale();
                 let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
+                let dirs: Vec<&str> = t.repos.iter().map(|r| r.dir_name()).collect();
                 let branch = t.repos.first().map(|r| r.branch.as_str()).unwrap_or("");
                 let (pane_id, agent_status) = live_agent(t, &agents);
 
@@ -47,6 +48,7 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
                     "task_id": t.id,
                     "path": t.path,
                     "repos": repo_names,
+                    "dirs": dirs,
                     "repo_count": t.repos.len(),
                     "branch": branch,
                     "created_at": t.created_at,
@@ -65,7 +67,7 @@ pub fn run(ctx: &Ctx) -> Result<(), GroveError> {
         );
         for t in &tasks {
             let stale = t.is_stale();
-            let repo_names: Vec<&str> = t.repos.iter().map(|r| r.repo_name.as_str()).collect();
+            let repo_names: Vec<String> = t.repos.iter().map(|r| r.display_name()).collect();
             let (_pane_id, agent_status) = live_agent(t, &agents);
             let status = if stale { "STALE" } else { "ok" };
 

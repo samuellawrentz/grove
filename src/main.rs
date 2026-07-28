@@ -118,7 +118,15 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             repo,
             branch,
             base,
-        } => commands::add::run(&task_id, &repo, branch.as_deref(), base.as_deref(), &ctx)?,
+            dir,
+        } => commands::add::run(
+            &task_id,
+            &repo,
+            branch.as_deref(),
+            base.as_deref(),
+            dir.as_deref(),
+            &ctx,
+        )?,
     }
 
     Ok(())

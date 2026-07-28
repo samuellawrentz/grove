@@ -65,6 +65,14 @@ grove add <task> <repo>             # add a repo's worktree to an existing task
 grove close <task> [--force]        # remove worktrees; --force discards uncommitted work
 ```
 
+A repo goes into a task once by default. To hold a *second* worktree of a repo the task already has (e.g. two PRs of one repo on the same ticket), name its directory explicitly:
+
+```bash
+grove add <task> <repo> --branch pr-72 --dir <repo>-pr72   # worktree at ~/tasks/<task>/<repo>-pr72/
+```
+
+`--dir` must be a plain directory name (`[a-zA-Z0-9._-]+`, no separators). Without it, adding a repo twice is still a conflict. `list`/`status` show aliased worktrees as `<dir> (<repo>)`.
+
 ### Drive an agent
 
 ```bash

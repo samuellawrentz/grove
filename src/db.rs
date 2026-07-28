@@ -23,6 +23,29 @@ pub struct TaskRepo {
     pub branch: String,
 }
 
+impl TaskRepo {
+    /// The worktree's directory name under the task dir. Equal to `repo_name`
+    /// unless the worktree was added under an explicit `--dir` alias, which is
+    /// how one task holds two worktrees of the same repo.
+    pub fn dir_name(&self) -> &str {
+        self.worktree_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&self.repo_name)
+    }
+
+    /// Human label for list/status: the directory, qualified with the repo when
+    /// they differ so two checkouts of one repo stay tellable apart.
+    pub fn display_name(&self) -> String {
+        let dir = self.dir_name();
+        if dir == self.repo_name {
+            dir.to_string()
+        } else {
+            format!("{dir} ({})", self.repo_name)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEntry {
     pub id: String,
@@ -216,6 +239,9 @@ impl Db {
         if version < 5 {
             self.migrate_v5()?;
         }
+        if version < 6 {
+            self.migrate_v6()?;
+        }
         Ok(())
     }
 
@@ -249,6 +275,41 @@ impl Db {
                     .execute_batch("ALTER TABLE task_repos_v5 RENAME TO task_repos;")?;
             }
             self.conn.pragma_update(None, "user_version", 5)?;
+            Ok(())
+        })
+    }
+
+    /// V6: re-key task_repos on the worktree path instead of the repo name, so a
+    /// task can hold two worktrees of the SAME repo (`grove add --dir <name>`).
+    /// Under the old PK the second row was a constraint violation.
+    ///
+    /// Lossless: before this, every worktree was `<task dir>/<repo name>`, so
+    /// rows unique on (task_id, repo_name) are already unique on
+    /// (task_id, worktree). Same idempotent shape as V5 so a crash between steps
+    /// replays cleanly.
+    fn migrate_v6(&self) -> Result<(), GroveError> {
+        self.transaction(|| {
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS task_repos_v6 (
+                     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                     repo_name   TEXT NOT NULL,
+                     worktree    TEXT NOT NULL,
+                     branch      TEXT NOT NULL,
+                     PRIMARY KEY (task_id, worktree)
+                 );",
+            )?;
+            if self.table_exists("task_repos")? {
+                self.conn.execute_batch(
+                    "INSERT OR IGNORE INTO task_repos_v6 (task_id, repo_name, worktree, branch)
+                         SELECT task_id, repo_name, worktree, branch FROM task_repos;
+                     DROP TABLE task_repos;",
+                )?;
+            }
+            if !self.table_exists("task_repos")? {
+                self.conn
+                    .execute_batch("ALTER TABLE task_repos_v6 RENAME TO task_repos;")?;
+            }
+            self.conn.pragma_update(None, "user_version", 6)?;
             Ok(())
         })
     }
@@ -776,7 +837,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -1082,13 +1143,13 @@ mod tests {
             conn.pragma_update(None, "user_version", 4).unwrap();
         }
 
-        // Re-open via grove → runs the V4→V5 migration.
+        // Re-open via grove → runs the V4→V5→V6 migrations.
         let db = Db::open_path(&path).unwrap();
         let version: u32 = db
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         let task = db.get_task("T").unwrap().unwrap();
         assert_eq!(task.repos.len(), 2, "both repos preserved across migration");
@@ -1100,6 +1161,35 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM task_repos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// V6 re-keys task_repos on the worktree path, so one task can hold two
+    /// worktrees of the SAME repo (`grove add --dir`). Under the old
+    /// (task_id, repo_name) key the second row was a constraint violation.
+    #[test]
+    fn two_worktrees_of_one_repo_round_trip() {
+        let db = open_temp();
+        let mut task = make_task("T");
+        task.repos = vec![
+            TaskRepo {
+                repo_name: "r1".to_string(),
+                worktree_path: PathBuf::from("/tmp/tasks/T/r1"),
+                branch: "b1".to_string(),
+            },
+            TaskRepo {
+                repo_name: "r1".to_string(),
+                worktree_path: PathBuf::from("/tmp/tasks/T/r1-pr72"),
+                branch: "b2".to_string(),
+            },
+        ];
+        db.upsert_task(&task).unwrap();
+
+        let got = db.get_task("T").unwrap().unwrap();
+        assert_eq!(got.repos.len(), 2, "both worktrees of r1 must persist");
+        assert_eq!(got.repos[0].dir_name(), "r1");
+        assert_eq!(got.repos[0].display_name(), "r1");
+        assert_eq!(got.repos[1].dir_name(), "r1-pr72");
+        assert_eq!(got.repos[1].display_name(), "r1-pr72 (r1)");
     }
 
     /// TX-get-task-equals-list-tasks-row (P1, Step 12): the two read paths must
@@ -1258,17 +1348,33 @@ mod tests {
         sql.contains("ON DELETE CASCADE")
     }
 
-    /// MIG-v0-to-v5-fresh: fresh DB reaches v5 with the cascading task_repos.
-    #[test]
-    fn mig_v0_to_v5_fresh() {
-        let db = open_temp();
-        assert_eq!(user_version(&db), 5);
-        assert!(task_repos_cascades(&db));
+    /// True when task_repos is keyed on the worktree (V6) rather than the repo
+    /// name — what lets a task hold two worktrees of one repo.
+    fn task_repos_keyed_on_worktree(db: &Db) -> bool {
+        let sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_repos'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        sql.contains("PRIMARY KEY (task_id, worktree)")
     }
 
-    /// MIG-incremental-v1-to-v5: a v1-only DB migrates up to v5 preserving rows.
+    /// MIG-v0-to-head-fresh: fresh DB reaches head with the cascading,
+    /// worktree-keyed task_repos.
     #[test]
-    fn mig_incremental_v1_to_v5() {
+    fn mig_v0_to_head_fresh() {
+        let db = open_temp();
+        assert_eq!(user_version(&db), 6);
+        assert!(task_repos_cascades(&db));
+        assert!(task_repos_keyed_on_worktree(&db));
+    }
+
+    /// MIG-incremental-v1-to-head: a v1-only DB migrates up preserving rows.
+    #[test]
+    fn mig_incremental_v1_to_head() {
         let db = open_raw();
         db.conn.execute_batch(SCHEMA_V1).unwrap();
         db.conn.pragma_update(None, "user_version", 1).unwrap();
@@ -1285,8 +1391,9 @@ mod tests {
 
         db.migrate().unwrap();
 
-        assert_eq!(user_version(&db), 5);
+        assert_eq!(user_version(&db), 6);
         assert!(task_repos_cascades(&db));
+        assert!(task_repos_keyed_on_worktree(&db));
         let n: u32 = db
             .conn
             .query_row("SELECT count(*) FROM task_repos", [], |r| r.get(0))
@@ -1334,8 +1441,9 @@ mod tests {
 
         db.migrate().unwrap();
 
-        assert_eq!(user_version(&db), 5);
+        assert_eq!(user_version(&db), 6);
         assert!(task_repos_cascades(&db));
+        assert!(task_repos_keyed_on_worktree(&db));
         let n: u32 = db
             .conn
             .query_row("SELECT count(*) FROM task_repos", [], |r| r.get(0))
