@@ -325,7 +325,13 @@ impl Db {
 
     // ── Pane agents ───────────────────────────────────────────────────────────
     // Authoritative record of agent kind for panes launched by grove.
+    //
+    // Orphaned by the herdr swap: herdr owns pane/agent state now and grove
+    // resolves it by cwd, so nothing calls these. Kept (not deleted) because the
+    // rows and the G2 structural invariants around them still stand, and a
+    // grove-side pane store may want them back. Retire or delete deliberately.
 
+    #[allow(dead_code)]
     pub(crate) fn record_pane_agent(&self, pane_id: &str, kind: &str) -> Result<(), GroveError> {
         self.conn.execute(
             "INSERT INTO pane_agents (pane_id, agent_kind) VALUES (?1, ?2)
@@ -337,6 +343,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn list_pane_agents(
         &self,
     ) -> Result<std::collections::HashMap<String, String>, GroveError> {
@@ -354,6 +361,7 @@ impl Db {
         Ok(out)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn delete_pane_agent(&self, pane_id: &str) -> Result<(), GroveError> {
         self.conn
             .execute("DELETE FROM pane_agents WHERE pane_id = ?1", [pane_id])?;
@@ -364,6 +372,7 @@ impl Db {
     // User-asserted marks that force a pane into the "others" tab regardless of
     // any detected agent.
 
+    #[allow(dead_code)]
     pub fn mark_pane_other(&self, pane_id: &str) -> Result<(), GroveError> {
         self.conn.execute(
             "INSERT INTO pane_overrides (pane_id) VALUES (?1) ON CONFLICT(pane_id) DO NOTHING",
@@ -372,12 +381,14 @@ impl Db {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn unmark_pane_other(&self, pane_id: &str) -> Result<(), GroveError> {
         self.conn
             .execute("DELETE FROM pane_overrides WHERE pane_id = ?1", [pane_id])?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn list_pane_overrides(&self) -> Result<std::collections::HashSet<String>, GroveError> {
         let mut stmt = self.conn.prepare("SELECT pane_id FROM pane_overrides")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -441,6 +452,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn delete_project(&self, path: &str) -> Result<(), GroveError> {
         let (canonical, _) = canonical_path_and_name(path);
         self.conn
@@ -563,6 +575,7 @@ impl Db {
 
     // ── Notes ─────────────────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn get_note(&self, project_path: &str) -> Result<Option<String>, GroveError> {
         let (canonical, _) = canonical_path_and_name(project_path);
         let mut stmt = self
@@ -576,6 +589,7 @@ impl Db {
         }
     }
 
+    #[allow(dead_code)]
     pub fn save_note(&self, project_path: &str, content: &str) -> Result<(), GroveError> {
         let (canonical, _) = canonical_path_and_name(project_path);
         self.conn.execute(
@@ -681,6 +695,7 @@ impl Db {
     /// inside the task's window gets a fresh id, so the recorded one goes stale;
     /// commands that locate the pane by a fallback write the live id back. No-op
     /// for an unknown task.
+    #[allow(dead_code)]
     pub fn heal_pane_id(&self, task_id: &str, pane_id: &str) -> Result<(), GroveError> {
         self.conn.execute(
             "UPDATE tasks SET pane_id = ?2 WHERE id = ?1",

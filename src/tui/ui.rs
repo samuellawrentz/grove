@@ -55,7 +55,10 @@ fn draw_recents(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled(format!("  {}", project.name), name_style),
                 Span::styled(format!("  {}", shorten_path(&project.path)), dim),
-                Span::styled(format!("  {}", format_relative_time(&project.last_seen)), dim),
+                Span::styled(
+                    format!("  {}", format_relative_time(&project.last_seen)),
+                    dim,
+                ),
             ])
         })
         .collect();
@@ -91,7 +94,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Overlay::None => {
             if let Some(ref msg) = app.status_message {
-                Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Yellow)))
+                Line::from(Span::styled(
+                    msg.as_str(),
+                    Style::default().fg(Color::Yellow),
+                ))
             } else {
                 Line::from(Span::styled(
                     "j/k:nav  /:search  Enter:claude  o:open  n:new task  q:quit",
@@ -112,7 +118,14 @@ fn shorten_path(path: &std::path::Path) -> String {
     };
     const MAX: usize = 48;
     if s.chars().count() > MAX {
-        let tail: String = s.chars().rev().take(MAX - 1).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(MAX - 1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("…{tail}")
     } else {
         s

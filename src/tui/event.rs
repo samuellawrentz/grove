@@ -50,8 +50,8 @@ pub(crate) fn run_event_loop(
             event::poll(timeout).map_err(|e| GroveError::Tui(format!("poll error: {e}")))?;
 
         if has_event {
-            if let Event::Key(key) = event::read()
-                .map_err(|e| GroveError::Tui(format!("read error: {e}")))?
+            if let Event::Key(key) =
+                event::read().map_err(|e| GroveError::Tui(format!("read error: {e}")))?
             {
                 actions::handle_key(app, key);
             }

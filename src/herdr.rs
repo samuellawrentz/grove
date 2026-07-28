@@ -94,7 +94,10 @@ fn run(args: &[&str]) -> Result<serde_json::Value, GroveError> {
         return Err(GroveError::General(format!("herdr error: {err}")));
     }
 
-    Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    Ok(value
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 /// All live agents herdr knows about.
@@ -114,6 +117,8 @@ pub fn resolve_agent_for_cwd(worktree_path: &Path) -> Result<Option<AgentInfo>, 
 }
 
 /// The herdr pane id (e.g. "w1:p1") whose agent cwd matches `worktree_path`.
+// Superseded by resolve_agent_for_cwd, which returns the whole agent record.
+#[allow(dead_code)]
 pub fn resolve_pane_for_cwd(worktree_path: &Path) -> Result<Option<String>, GroveError> {
     Ok(resolve_agent_for_cwd(worktree_path)?.map(|a| a.pane_id))
 }
@@ -135,7 +140,15 @@ pub fn send(pane_id: &str, text: &str) -> Result<(), GroveError> {
 /// mapped to `Timeout`, everything else stays a general failure.
 pub fn wait(pane_id: &str, status: &str, timeout_ms: u64) -> Result<(), GroveError> {
     let timeout = timeout_ms.to_string();
-    match run(&["agent", "wait", pane_id, "--status", status, "--timeout", &timeout]) {
+    match run(&[
+        "agent",
+        "wait",
+        pane_id,
+        "--status",
+        status,
+        "--timeout",
+        &timeout,
+    ]) {
         Ok(_) => Ok(()),
         Err(e) => {
             let msg = e.to_string().to_lowercase();
@@ -163,7 +176,13 @@ pub fn close_workspace(workspace_id: &str) -> Result<(), GroveError> {
 /// Create a focused workspace rooted at `cwd`. Returns `(workspace_id, root_pane_id)`.
 pub fn create_workspace(cwd: &str, label: &str) -> Result<(String, String), GroveError> {
     let result = run(&[
-        "workspace", "create", "--cwd", cwd, "--label", label, "--focus",
+        "workspace",
+        "create",
+        "--cwd",
+        cwd,
+        "--label",
+        label,
+        "--focus",
     ])?;
     let workspace_id = result
         .pointer("/workspace/workspace_id")
@@ -194,7 +213,15 @@ pub fn run_in_pane(pane_id: &str, cmd: &str) -> Result<(), GroveError> {
 /// Split `pane_id` to the right with a new pane rooted at `cwd`. Returns the new
 /// pane id.
 pub fn split_pane(pane_id: &str, cwd: &str) -> Result<String, GroveError> {
-    let result = run(&["pane", "split", pane_id, "--direction", "right", "--cwd", cwd])?;
+    let result = run(&[
+        "pane",
+        "split",
+        pane_id,
+        "--direction",
+        "right",
+        "--cwd",
+        cwd,
+    ])?;
     result
         .pointer("/pane/pane_id")
         .and_then(|v| v.as_str())

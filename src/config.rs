@@ -143,6 +143,8 @@ impl Default for GroveConfig {
 impl GroveConfig {
     /// Resolve the command for an agent.
     /// Precedence: agent_commands["name"] > claude_command (for claude) > AgentDef.default_command
+    // Orphaned by the herdr swap: herdr launches agents now.
+    #[allow(dead_code)]
     pub fn resolved_agent_command(&self, agent_name: &str) -> String {
         if let Some(cmd) = self.agent_commands.get(agent_name) {
             return cmd.clone();

@@ -14,7 +14,9 @@ pub(crate) enum Overlay {
     /// Incremental search over the recents list.
     Search(String),
     /// A directory was picked (Enter or `o` → fzf); choosing what to run in it.
-    OpenChoice { dir: String },
+    OpenChoice {
+        dir: String,
+    },
 }
 
 /// A one-shot deferred shell side-effect run after the next draw, in a suspended

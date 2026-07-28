@@ -65,7 +65,11 @@ pub fn run(
     let workspace_id = task
         .repos
         .first()
-        .and_then(|r| crate::herdr::resolve_agent_for_cwd(&r.worktree_path).ok().flatten())
+        .and_then(|r| {
+            crate::herdr::resolve_agent_for_cwd(&r.worktree_path)
+                .ok()
+                .flatten()
+        })
         .and_then(|a| a.workspace_id);
 
     // Partial-failure safety (S4): on the non-force path, confirm every worktree

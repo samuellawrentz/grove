@@ -107,7 +107,7 @@ fn handle_open_choice_key(app: &mut App, key: KeyEvent, dir: String) {
     let claude = app.claude_cmd();
     let cmd: Option<&str> = match key.code {
         KeyCode::Char('c') => Some(claude.as_str()),
-        KeyCode::Char('t') => None,          // plain shell
+        KeyCode::Char('t') => None, // plain shell
         KeyCode::Char('e') => Some("nvim ."),
         KeyCode::Esc => {
             return; // cancelled
