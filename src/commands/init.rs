@@ -7,7 +7,7 @@ use crate::db::{Db, TaskEntry, TaskRepo};
 use crate::error::GroveError;
 use crate::git;
 use crate::output;
-use crate::validation::validate_identifier;
+use crate::validation::{validate_identifier, validate_ref_name};
 
 pub struct InitOptions<'a> {
     pub repos: &'a [String],
@@ -92,6 +92,15 @@ pub fn run(task_id: Option<&str>, opts: &InitOptions, ctx: &Ctx) -> Result<(), G
     let task_id = resolved_task_id.as_str();
 
     validate_identifier(task_id, "task-id")?;
+    // Only the explicitly passed refs are checked: the branch defaulted from a
+    // task-id is already identifier-validated, and re-checking a resolved branch
+    // would retroactively reject task ids existing tasks were created under.
+    if let Some(b) = opts.branch {
+        validate_ref_name(b, "branch")?;
+    }
+    if let Some(b) = opts.base {
+        validate_ref_name(b, "base")?;
+    }
 
     let (resolved_repos, resolved_branch) = if opts.interactive {
         interactive_prompt(task_id, opts.repos, opts.branch, db)?

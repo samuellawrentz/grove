@@ -2,6 +2,7 @@ mod integration;
 
 use integration::helpers::TestFixture;
 use predicates::prelude::*;
+use std::path::Path;
 
 // ============================================================================
 // Full Workflow Test
@@ -593,6 +594,315 @@ fn add_rejects_traversal_dir() {
     // Nothing was provisioned outside the task dir.
     assert!(!fix.tasks_dir.join("evil").exists());
     assert!(fix.tasks_dir.join("TASK-1").join("repo-a").exists());
+}
+
+// ============================================================================
+// Slashed ref names and detached worktrees (`add --branch feat/x`, `--detach`)
+// ============================================================================
+
+/// Run git in `dir` and return trimmed stdout; fails the test on a non-zero exit.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()
+        .expect("git spawn");
+    assert!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// REF-slashed-branch: the v0.9.0 regression. `--branch` was validated as a path
+/// segment, so every real CX branch (`user/ser-1234-thing`) was refused. The
+/// v0.9.0 suite missed it because its fixtures only ever used flat names.
+#[test]
+fn add_branch_with_slash_succeeds() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+
+    let output = fix
+        .grove_cmd()
+        .args([
+            "--json",
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--branch",
+            "kishan/ser-6070-vibe-screening",
+            "--dir",
+            "repo-a-pr72",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "slashed branch rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["branch"], "kishan/ser-6070-vibe-screening");
+
+    let wt = fix.tasks_dir.join("TASK-1").join("repo-a-pr72");
+    assert_eq!(
+        git_out(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "kishan/ser-6070-vibe-screening",
+        "worktree is on the slashed branch"
+    );
+}
+
+/// REF-slashed-base: `--base` was validated the same way, so branching off
+/// `release/1.2` was impossible too.
+#[test]
+fn add_base_with_slash_succeeds() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+    let bare = fix.repos_dir.join("repo-a.git");
+    // A slashed base branch to fork from.
+    git_out(&bare, &["branch", "release/1.2", "HEAD"]);
+
+    fix.grove_cmd()
+        .args([
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--branch",
+            "feat/from-release",
+            "--base",
+            "release/1.2",
+            "--dir",
+            "repo-a-rel",
+        ])
+        .assert()
+        .success();
+
+    let wt = fix.tasks_dir.join("TASK-1").join("repo-a-rel");
+    assert_eq!(
+        git_out(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/from-release"
+    );
+    assert_eq!(
+        git_out(&wt, &["rev-parse", "HEAD"]),
+        git_out(&bare, &["rev-parse", "release/1.2"]),
+        "forked from the slashed base"
+    );
+}
+
+/// REF-invalid: what git itself refuses stays refused, and nothing is
+/// provisioned when it is.
+#[test]
+fn add_rejects_invalid_ref_names() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+
+    for bad in ["feat/../evil", "/leading", "trailing/", "a..b", "has space"] {
+        fix.grove_cmd()
+            .args(["add", "TASK-1", "repo-a", "--branch", bad, "--dir", "wt"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid branch"));
+    }
+    assert!(!fix.tasks_dir.join("TASK-1").join("wt").exists());
+}
+
+/// DETACH-add: `--detach <commit-ish>` checks the worktree out at a bare commit,
+/// skipping branch resolution entirely — the call miller actually wants. Close
+/// then reclaims it with no branch warning, because there is no branch.
+#[test]
+fn add_detach_creates_detached_worktree() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+    let bare = fix.repos_dir.join("repo-a.git");
+    let sha = git_out(&bare, &["rev-parse", "HEAD"]);
+
+    let output = fix
+        .grove_cmd()
+        .args([
+            "--json",
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--detach",
+            &sha,
+            "--dir",
+            "repo-a-pr72",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "detached add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["detached"], sha);
+    assert_eq!(json["branch"], "", "a detached worktree is on no branch");
+
+    let wt = fix.tasks_dir.join("TASK-1").join("repo-a-pr72");
+    assert_eq!(git_out(&wt, &["rev-parse", "HEAD"]), sha, "at the commit");
+    let head = std::process::Command::new("git")
+        .args(["-C", wt.to_str().unwrap(), "symbolic-ref", "-q", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(
+        !head.status.success(),
+        "HEAD must be detached, not a branch"
+    );
+
+    // grove tracks it: the row is there and close reclaims it cleanly.
+    fix.grove_cmd()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repo-a-pr72 (repo-a)"));
+    let out = fix
+        .grove_cmd()
+        .args(["close", "TASK-1", "--force"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("not merged"),
+        "detached worktree must not produce a branch warning"
+    );
+    assert!(!fix.tasks_dir.join("TASK-1").exists());
+    assert!(
+        !git_out(&bare, &["worktree", "list"]).contains("TASK-1"),
+        "no prunable worktree entry left behind"
+    );
+}
+
+/// DETACH-conflict: `--detach` and `--branch` describe two different checkouts;
+/// asking for both is a clean, upfront error.
+#[test]
+fn add_detach_conflicts_with_branch() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+
+    fix.grove_cmd()
+        .args([
+            "add", "TASK-1", "repo-a", "--dir", "wt", "--branch", "feat/x", "--detach", "HEAD",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+    assert!(!fix.tasks_dir.join("TASK-1").join("wt").exists());
+}
+
+/// DETACH-same-branch-twice: the case `--branch` structurally cannot serve —
+/// git refuses to check one branch out in two worktrees. Detaching is how two
+/// members of a task sit on the same branch's commits.
+#[test]
+fn add_detach_allows_two_worktrees_on_one_branch() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+    let bare = fix.repos_dir.join("repo-a.git");
+
+    fix.grove_cmd()
+        .args([
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--branch",
+            "feat/shared",
+            "--dir",
+            "wt-a",
+        ])
+        .assert()
+        .success();
+
+    // Same branch again on --branch: git itself refuses.
+    fix.grove_cmd()
+        .args([
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--branch",
+            "feat/shared",
+            "--dir",
+            "wt-b",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already used by worktree"));
+
+    // Detached at the same branch's tip: fine.
+    let sha = git_out(&bare, &["rev-parse", "feat/shared"]);
+    fix.grove_cmd()
+        .args(["add", "TASK-1", "repo-a", "--detach", &sha, "--dir", "wt-b"])
+        .assert()
+        .success();
+
+    let task_dir = fix.tasks_dir.join("TASK-1");
+    assert_eq!(git_out(&task_dir.join("wt-a"), &["rev-parse", "HEAD"]), sha);
+    assert_eq!(git_out(&task_dir.join("wt-b"), &["rev-parse", "HEAD"]), sha);
+
+    let conn = rusqlite::Connection::open(&fix.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_repos WHERE task_id = 'TASK-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 3, "grove tracks all three worktrees");
+}
+
+/// DETACH-flag-injection: the commit-ish reaches `git worktree add`, so a value
+/// that would parse as a flag is refused before git sees it.
+#[test]
+fn add_rejects_flag_like_detach() {
+    let fix = TestFixture::new();
+    fixture_with_task_on_repo_a(&fix);
+
+    fix.grove_cmd()
+        .args([
+            "add",
+            "TASK-1",
+            "repo-a",
+            "--dir",
+            "wt",
+            "--detach",
+            "--upload-pack=evil",
+        ])
+        .assert()
+        .failure();
+    assert!(!fix.tasks_dir.join("TASK-1").join("wt").exists());
+}
+
+/// REF-init-parity: `init` accepted slashed branches all along; that must keep
+/// working now that it validates them, so init and add finally agree.
+#[test]
+fn init_accepts_slashed_branch() {
+    let fix = TestFixture::new();
+    let bare = fix.create_bare_repo("repo-a");
+    fix.grove_cmd()
+        .args(["register", "repo-a", bare.to_str().unwrap()])
+        .assert()
+        .success();
+
+    fix.grove_cmd()
+        .args(["init", "TASK-1", "repo-a", "--branch", "feat/slashed-name"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_out(
+            &fix.tasks_dir.join("TASK-1").join("repo-a"),
+            &["rev-parse", "--abbrev-ref", "HEAD"]
+        ),
+        "feat/slashed-name"
+    );
+
+    fix.grove_cmd()
+        .args(["init", "TASK-2", "repo-a", "--branch", "feat/../evil"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid branch"));
 }
 
 /// PROVISION-rollback-equiv (init): a worktree provisioned on a *pre-existing*

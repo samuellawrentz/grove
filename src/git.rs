@@ -221,6 +221,30 @@ pub fn create_worktree(
     Ok(())
 }
 
+/// Create a worktree checked out DETACHED at `commit_ish`.
+/// Runs `git worktree add --detach <worktree_path> <commit-ish>`.
+///
+/// No branch is created or claimed, which is the point: git refuses to check a
+/// branch out in two worktrees at once, so a detached checkout is the only way
+/// for a task to hold two worktrees sitting on the same branch's commits.
+pub fn create_worktree_detached(
+    bare_path: &Path,
+    worktree_path: &Path,
+    commit_ish: &str,
+    verbose: bool,
+) -> Result<(), GroveError> {
+    let wt_str = worktree_path
+        .to_str()
+        .ok_or_else(|| GroveError::General("invalid worktree path".to_string()))?;
+
+    run_git(
+        &["worktree", "add", "--detach", wt_str, commit_ish],
+        Some(bare_path),
+        verbose,
+    )?;
+    Ok(())
+}
+
 /// Remove a worktree from a bare repo.
 /// Runs `git worktree remove <path>`.
 pub fn remove_worktree(

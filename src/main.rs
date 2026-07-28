@@ -119,12 +119,14 @@ fn run(cli: Cli) -> Result<(), GroveError> {
             branch,
             base,
             dir,
+            detach,
         } => commands::add::run(
             &task_id,
             &repo,
             branch.as_deref(),
             base.as_deref(),
             dir.as_deref(),
+            detach.as_deref(),
             &ctx,
         )?,
     }

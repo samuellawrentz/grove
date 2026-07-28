@@ -68,10 +68,13 @@ grove close <task> [--force]        # remove worktrees; --force discards uncommi
 A repo goes into a task once by default. To hold a *second* worktree of a repo the task already has (e.g. two PRs of one repo on the same ticket), name its directory explicitly:
 
 ```bash
-grove add <task> <repo> --branch pr-72 --dir <repo>-pr72   # worktree at ~/tasks/<task>/<repo>-pr72/
+grove add <task> <repo> --branch feat/pr-72 --dir <repo>-pr72   # worktree at ~/tasks/<task>/<repo>-pr72/
+grove add <task> <repo> --detach <sha> --dir <repo>-pr72        # read-only checkout, on no branch
 ```
 
 `--dir` must be a plain directory name (`[a-zA-Z0-9._-]+`, no separators). Without it, adding a repo twice is still a conflict. `list`/`status` show aliased worktrees as `<dir> (<repo>)`.
+
+`--branch`/`--base` take any name `git check-ref-format --branch` accepts, slashes included (`kishan/ser-6070-thing`). `--detach <commit-ish>` checks the worktree out at a bare commit instead — mutually exclusive with `--branch`, and the only way two worktrees of one repo can sit on the same branch's commits (git refuses to check one branch out twice). A detached worktree records no branch, so `close` reclaims it without touching refs.
 
 ### Drive an agent
 

@@ -216,5 +216,9 @@ pub enum Commands {
         /// second worktree of a repo it already has
         #[arg(long)]
         dir: Option<String>,
+        /// Check out DETACHED at this commit-ish instead of on a branch; the
+        /// only way two worktrees can sit on the same branch's commits
+        #[arg(long, value_name = "COMMIT", conflicts_with = "branch")]
+        detach: Option<String>,
     },
 }

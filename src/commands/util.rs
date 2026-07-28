@@ -27,6 +27,22 @@ pub fn provision_worktree(
     Ok(())
 }
 
+/// Provision a DETACHED worktree and journal its undo.
+///
+/// The branch half of [`provision_worktree`] is skipped entirely — nothing is
+/// created, so the journal only ever has the worktree to remove.
+pub fn provision_detached_worktree(
+    journal: &mut StepJournal,
+    bare_path: &Path,
+    worktree_path: &Path,
+    commit_ish: &str,
+    verbose: bool,
+) -> Result<(), GroveError> {
+    git::create_worktree_detached(bare_path, worktree_path, commit_ish, verbose)?;
+    journal.worktree(bare_path, worktree_path, None);
+    Ok(())
+}
+
 /// Find a registered repo by name in an already-loaded list.
 ///
 /// init/close/sync legitimately `list_repos()` once and iterate; this dedups

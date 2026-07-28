@@ -3,7 +3,7 @@ use crate::commands::Ctx;
 use crate::db::TaskRepo;
 use crate::error::GroveError;
 use crate::output;
-use crate::validation::validate_identifier;
+use crate::validation::{validate_commitish, validate_identifier, validate_ref_name};
 
 pub fn run(
     task_id: &str,
@@ -11,6 +11,7 @@ pub fn run(
     branch: Option<&str>,
     base: Option<&str>,
     dir: Option<&str>,
+    detach: Option<&str>,
     ctx: &Ctx,
 ) -> Result<(), GroveError> {
     let db = ctx.db;
@@ -18,11 +19,17 @@ pub fn run(
     let verbose = ctx.verbose;
 
     validate_identifier(repo_name, "repo")?;
+    // Branch and base are ref names, not path segments: they legitimately carry
+    // `/` (`user/ser-1234-thing`), so they get the ref-name rules, NOT the
+    // single-path-component rule below.
     if let Some(b) = branch {
-        validate_identifier(b, "branch")?;
+        validate_ref_name(b, "branch")?;
     }
     if let Some(b) = base {
-        validate_identifier(b, "base")?;
+        validate_ref_name(b, "base")?;
+    }
+    if let Some(c) = detach {
+        validate_commitish(c, "commit")?;
     }
     // The alias is a caller-supplied path segment joined onto the task dir, and
     // close() later hands that path to remove_dir_all — same hazard class as the
@@ -49,10 +56,22 @@ pub fn run(
         )));
     }
 
-    let branch_name = branch
-        .map(String::from)
-        .or_else(|| task.repos.first().map(|r| r.branch.clone()))
-        .unwrap_or_else(|| task_id.to_string());
+    // A detached worktree is on no branch at all, and an empty branch is how the
+    // record says so — close() then knows there is nothing to delete, and the
+    // next `add` inherits the task's real branch, not this hole.
+    let branch_name = if detach.is_some() {
+        String::new()
+    } else {
+        branch
+            .map(String::from)
+            .or_else(|| {
+                task.repos
+                    .iter()
+                    .find(|r| !r.branch.is_empty())
+                    .map(|r| r.branch.clone())
+            })
+            .unwrap_or_else(|| task_id.to_string())
+    };
     let worktree_path = task.path.join(dir_name);
 
     let repo_entry = db
@@ -67,14 +86,23 @@ pub fn run(
     // Journal the worktree (B2: add had zero rollback); the DB write goes last
     // inside a terminal tx so a failure rolls back and the journal unwinds.
     let mut journal = StepJournal::new(verbose);
-    crate::commands::util::provision_worktree(
-        &mut journal,
-        &bare_path,
-        &worktree_path,
-        &branch_name,
-        &base_branch,
-        verbose,
-    )?;
+    match detach {
+        Some(commit) => crate::commands::util::provision_detached_worktree(
+            &mut journal,
+            &bare_path,
+            &worktree_path,
+            commit,
+            verbose,
+        )?,
+        None => crate::commands::util::provision_worktree(
+            &mut journal,
+            &bare_path,
+            &worktree_path,
+            &branch_name,
+            &base_branch,
+            verbose,
+        )?,
+    }
 
     task.repos.push(TaskRepo {
         repo_name: repo_name.to_string(),
@@ -90,6 +118,7 @@ pub fn run(
         "dir": dir_name,
         "worktree_path": worktree_path,
         "branch": branch_name,
+        "detached": detach,
     });
     // Name the directory only when it is not the repo name, so the default
     // message is byte-identical to what callers saw before --dir existed.
@@ -98,9 +127,13 @@ pub fn run(
     } else {
         format!(" at '{dir_name}'")
     };
+    let checkout = match detach {
+        Some(commit) => format!("detached at {commit}"),
+        None => format!("branch: {branch_name}"),
+    };
     output::success(
         json_mode,
-        &format!("Added repo '{repo_name}' to task '{task_id}'{at} (branch: {branch_name})"),
+        &format!("Added repo '{repo_name}' to task '{task_id}'{at} ({checkout})"),
         data,
     );
 

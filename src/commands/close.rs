@@ -141,8 +141,13 @@ pub fn run(
 
                 // Always clean up the task branch. By default use a safe delete
                 // (merged-only) so unmerged work is preserved; `--delete-branches/-D`
-                // force-deletes regardless.
-                if let Err(e) = git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose)
+                // force-deletes regardless. A detached worktree (`add --detach`)
+                // records an empty branch — there is nothing to delete, and
+                // asking git would only produce a bogus "not merged" warning.
+                if task_repo.branch.is_empty() {
+                    // detached checkout: no branch of ours to reclaim.
+                } else if let Err(e) =
+                    git::delete_branch(&bp, &task_repo.branch, delete_branches, verbose)
                 {
                     if delete_branches {
                         warnings.push(format!(
