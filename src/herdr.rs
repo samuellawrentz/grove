@@ -125,12 +125,11 @@ pub fn resolve_pane_for_cwd(worktree_path: &Path) -> Result<Option<String>, Grov
 
 /// Type `text` into `pane_id`'s agent and submit it.
 ///
-/// `herdr agent send` delivers the text but does NOT submit it for a TUI agent
-/// like Claude (the prompt just sits in the input box). So we drive the pane
-/// directly: send the text, then a separate Enter to submit the turn.
+/// `herdr agent prompt` (herdr >= 0.7.5) atomically delivers the text and the
+/// Enter, honoring the pane's bracketed-paste mode, so the turn actually starts
+/// instead of the prompt sitting in the input box.
 pub fn send(pane_id: &str, text: &str) -> Result<(), GroveError> {
-    run(&["pane", "send-text", pane_id, text])?;
-    run(&["pane", "send-keys", pane_id, "enter"]).map(|_| ())
+    run(&["agent", "prompt", pane_id, text]).map(|_| ())
 }
 
 /// Block until `pane_id`'s agent reaches `status`, or `timeout_ms` elapses.
