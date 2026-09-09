@@ -202,6 +202,9 @@ pub fn run(
     // `state.json` grove never checked — so a path pointing outside the tasks
     // dir must be refused, not deleted. Belt-and-suspenders with the identifier
     // fix; a recursive delete of an unvalidated path deserves its own guard.
+    // Drop the recents row while the path still resolves (canonicalization).
+    db.delete_project(&task.path.to_string_lossy())?;
+
     if task.path.exists() {
         if crate::validation::is_within(&task.path, &ctx.config.tasks_dir) {
             if let Err(e) = std::fs::remove_dir_all(&task.path) {

@@ -452,7 +452,6 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn delete_project(&self, path: &str) -> Result<(), GroveError> {
         let (canonical, _) = canonical_path_and_name(path);
         self.conn
@@ -920,6 +919,16 @@ mod tests {
         db.upsert_project("/tmp").unwrap();
         let projects = db.list_projects().unwrap();
         assert_eq!(projects.len(), 1);
+    }
+
+    #[test]
+    fn test_project_delete() {
+        let db = open_temp();
+        db.upsert_project("/tmp").unwrap();
+        db.delete_project("/tmp").unwrap();
+        assert!(db.list_projects().unwrap().is_empty());
+        // Deleting a missing row is a no-op, not an error.
+        db.delete_project("/tmp").unwrap();
     }
 
     fn make_repo(name: &str) -> RepoEntry {
