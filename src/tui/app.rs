@@ -129,7 +129,11 @@ impl App {
     pub(crate) fn launch_workspace(&mut self, dir: &str, cmd: Option<&str>) {
         let label = basename(dir);
         match herdr::launch_workspace(dir, &label, cmd) {
-            Ok(_) => self.should_quit = self.popup,
+            Ok(_) => {
+                // Record the open so the recents list reflects real usage.
+                let _ = self.db.upsert_project(dir);
+                self.should_quit = self.popup;
+            }
             Err(e) => self.status_message = Some(format!("launch failed: {e}")),
         }
     }
